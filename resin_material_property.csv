@@ -1,0 +1,4 @@
+﻿Resin material,Young’s modulus (MPa),Poisson’s ratio,Coefficient of Thermal Expansion (1/K),Plastic stress - 1 (MPa),Plastic strain - 1,Plastic stress - 2 (MPa),Plastic strain - 2
+ELER-8-130,25000.00 ,0.20 ,0.0000080 ,4.00,0.00,200.00,0.30
+Plaskon SMT-B-1F,15200.00 ,0.40 ,0.0000130 ,2.00,0.00,200.00,0.40
+CEL-400,20000.00 ,0.40 ,0.0000600 ,3.00,0.00,600.00,0.30
