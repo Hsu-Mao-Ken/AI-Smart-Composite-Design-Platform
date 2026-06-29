@@ -1411,8 +1411,6 @@ def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plai
     """
     修改後的版本：強制離屏渲染，支援雲端部署
     """
-    import numpy as np
-    import pyvista as pv
     
     # [核心修正] 初始化 Plotter 時強制指定 off_screen=True
     # 這能避免它試圖尋找顯示卡驅動或 X Server
