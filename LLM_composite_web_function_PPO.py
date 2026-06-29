@@ -1409,57 +1409,50 @@ import numpy as np
 # ==========================================
 def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plain"):
     """
-    產生 3D 編織模型的 PyVista Plotter 物件，完美支援平紋、斜紋與緞紋，並修復穿模
+    修改後的版本：強制離屏渲染，支援雲端部署
     """
+    import numpy as np
+    import pyvista as pv
+    
+    # [核心修正] 初始化 Plotter 時強制指定 off_screen=True
+    # 這能避免它試圖尋找顯示卡驅動或 X Server
+    plotter = pv.Plotter(off_screen=True) 
+
+    # --- 以下保持您原本的邏輯 ---
     num_yarns = 8 
     theta = np.radians(angle) 
-    
     pitch = (width * 1.1) / max(np.sin(theta), 0.1)
-    
-    # [修改 1] 保留最適合斜紋與緞紋展示的視覺誇張係數 2.5
     visual_z_scale = 2.5 
     amp = (height / 2) * visual_z_scale
-
     style = weave_style.lower()
     
-    # [整合核心] 根據不同的編織法給予專屬的相位偏移
     if style in ["twill", "斜紋"]:
         d1, d2 = np.pi / 2, np.pi / 2
-        # **斜紋不需要額外偏移，保留完美的長浮動流暢交錯**
         offset_u, offset_v = 0.0, 0.0
     elif style in ["satin", "段紋", "緞紋"]:
         d1, d2 = 2 * np.pi / 5, 4 * np.pi / 5 
-        # **[修改 2] 核心修復：緞紋也需要特定的中心對齊相位校正，解決穿模問題**
         offset_u = ((num_yarns - 1) / 2) * d2
         offset_v = ((num_yarns - 1) / 2) * d1
     else:
-        # 預設為 plain 平紋
         d1, d2 = np.pi, np.pi            
-        # **平紋加入相位校正**
         offset_u = ((num_yarns - 1) / 2) * d2
         offset_v = ((num_yarns - 1) / 2) * d1
 
     vec_warp = np.array([1.0, 0.0, 0.0]) 
     vec_weft = np.array([np.cos(theta), np.sin(theta), 0.0])
-
     fabric_span = (num_yarns - 1) * pitch
     yarn_len_logical = fabric_span + width * 2.5
-
-    plotter = pv.Plotter(notebook=True)
     tube_z_scale = (height / width) * (visual_z_scale * 0.8)
 
     # --- 建立經紗 (Warp) ---
     for i in range(num_yarns):
         v_logical = (i - (num_yarns - 1) / 2) * pitch
         u_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
-        
         points = []
         for u in u_points:
             pos = u * vec_warp + v_logical * vec_weft
-            # **將 offset_u 整合進cosine方程式中**
             z = amp * np.cos(i * d1 + u * (d2 / pitch) + offset_u)
             points.append([pos[0], pos[1], z])
-            
         tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
         tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
         plotter.add_mesh(tube, color="crimson", smooth_shading=True, specular=0.5)
@@ -1468,22 +1461,20 @@ def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plai
     for j in range(num_yarns):
         u_logical = (j - (num_yarns - 1) / 2) * pitch
         v_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
-        
         points = []
         for v in v_points:
             pos = u_logical * vec_warp + v * vec_weft
             z = amp * np.cos(v * (d1 / pitch) + j * d2 + offset_v + np.pi)
             points.append([pos[0], pos[1], z])
-
         tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
         tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
         plotter.add_mesh(tube, color="dodgerblue", smooth_shading=True, specular=0.5)
 
+    # --- 視覺設定 ---
     plotter.set_background("white")
-    plotter.add_axes()
+    # 移除或註解掉 add_axes()，有時在極端無頭環境下該函式會引發顯示調用
+    # plotter.add_axes() 
     plotter.view_isometric()
-    
-    # [修改 3] 保留最適合斜紋與緞紋展示的 15 度攝影機仰角
     plotter.camera.elevation = 15 
     plotter.camera.azimuth = 45
     plotter.camera.zoom(1.2)
