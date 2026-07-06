@@ -82,6 +82,8 @@ chat_input_prompt = st.chat_input("Please enter your design requirements or ques
 final_prompt = button_prompt if button_prompt else chat_input_prompt
 
 if final_prompt:
+    # 【新增這行】在執行新的預測或設計前，強制清除之前殘留的 3D 繪圖記憶體快取
+    pv.close_all()
     st.chat_message("user").markdown(final_prompt)
     st.session_state.messages.append({"role": "user", "content": final_prompt})
 
