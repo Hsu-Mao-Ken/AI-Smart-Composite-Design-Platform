@@ -6,8 +6,7 @@ import os
 import pyvista as pv
 
 # 設定環境變數並啟動虛擬顯示器
-os.environ["DISPLAY"] = ":99.0"
-pv.start_xvfb()
+pv.OFF_SCREEN = True
 
 
 import streamlit as st
