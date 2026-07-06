@@ -18,3 +18,11 @@ safetensors==0.7.0
 pyarrow==22.0.0
 requests==2.32.3
 stpyvista==0.1.4
+requests==2.32.3
+stpyvista==0.1.4
+pyvista
+vtk
+trame
+trame-vuetify
+trame-vtk
+h5py
