@@ -1,0 +1,3 @@
+﻿Fiber material,Fiber diameter (mm),fiber number,Young’s modulus X (MPa),Young’s modulus Y (MPa),Young’s modulus Z (MPa),Shear modulus XY (MPa),Shear modulus XZ (MPa),Shear modulus YZ (MPa),Poisson’s ratio X,Poisson’s ratio Y,Poisson’s ratio Z,Coefficient of Thermal Expansion X (1/K),Coefficient of Thermal Expansion Y (1/K),Coefficient of Thermal Expansion Z (1/K)
+Carbon,0.0070,3000.00,230000.00,23000.00,23000.00,9000.00,9000.00,9000.00,0.26,0.26,0.26,0.0000015 ,0.0000100 ,0.0000100 
+E-glass,0.0170,3000.00,72000.00,72000.00,72000.00,30000.00,30000.00,30000.00,0.20,0.20,0.20,0.0000050 ,0.0000050 ,0.0000050 
