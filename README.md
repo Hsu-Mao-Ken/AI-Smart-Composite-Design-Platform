@@ -1,4 +1,4 @@
-# Generative AI Woven Composite Intelligent Design Platform
+# AI Woven Composite Intelligent Design Platform
 
 ## Overview
 This repository contains the official implementation of the Generative AI Woven Composite Intelligent Design Platform. The framework seamlessly integrates automated data simulation, a dual-stage surrogate model for macroscopic mechanical property prediction (elasticity and plasticity), and a Proximal Policy Optimization (PPO) algorithm for structural optimization. Furthermore, the platform utilizes Generative AI (Llama-3.3-70B) to establish an advanced architecture that accepts natural language as the primary input for automated composite material design and evaluation. Unmanned Aerial Vehicles (UAVs) are included as a secondary application-side supplement.
