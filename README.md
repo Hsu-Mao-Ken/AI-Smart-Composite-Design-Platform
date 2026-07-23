@@ -31,3 +31,13 @@ The computational procedures and model training were conducted using the followi
 Install the required dependencies using:
 ```bash
 pip install -r requirements.txt
+```
+
+Ensure all pre-trained weights (.pth) and scalers (.pkl) are located in the root directory.
+Start the Intelligent Design Platform by running the main web application script:
+```bash
+streamlit run LLM_composite_web_PPO_APP.py
+```
+
+
+
