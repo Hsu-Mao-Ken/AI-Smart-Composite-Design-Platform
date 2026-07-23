@@ -1,0 +1,62 @@
+*Elset, elset=ALLELEMENTS, generate
+      1,  125000,       1
+*Nset, nset=ALLNODES, generate
+      1,  132651,       1
+*Nset, nset=M9
+132658
+*Elset, elset=_SURFA_S3, generate
+     50,  125000,      50
+*Surface, type=ELEMENT, name=SURFA
+_SURFA_S3, S3
+** Constraint: Constraint-1
+*Coupling, constraint name=Constraint-1, ref node=M9, surface=SURFA
+*Kinematic
+*Amplitude, name=AMP-1
+             0.,              0.,              1,              1.
+*******************
+*** CREATE STEP ***
+*******************
+*** PREDEFINED FIELDS ***
+*** Name: Initial temperature 0ºC all cells   Type: Temperature ***
+*Initial Conditions, type=TEMPERATURE
+AllNodes, 0.
+** Name: BC-1 Type: Symmetry/Antisymmetry/Encastre
+*Boundary
+FACEB, XSYMM
+EDGE4, XSYMM
+EDGE5, XSYMM
+EDGE8, XSYMM
+** Name: BC-2 Type: Symmetry/Antisymmetry/Encastre
+*Boundary
+FACED, YSYMM
+EDGE9, YSYMM
+EDGE12, YSYMM
+** Name: BC-3 Type: Displacement/Rotation
+*Boundary
+MasterNode1, 1, 1
+MasterNode1, 2, 2
+MasterNode1, 3, 3
+***----------------------------------------------------------------------------
+** 
+** STEP: Step-1
+** 
+*Step, name=Step-1, nlgeom=NO, inc=1000000
+*Static, direct
+0.05, 1., 
+** 
+** BOUNDARY CONDITIONS
+** 
+** Name: BC-4 Type: Displacement/Rotation
+*Boundary, amplitude=AMP-1
+M9, 1, 1, dis_change
+M9, 2, 2
+M9, 3, 3
+***********************
+*** OUTPUT REQUESTS ***
+***********************
+*Output, field
+*Element Output, directions=YES
+E, S
+*NODE Output, nset=M9
+U,RF
+*End Step
