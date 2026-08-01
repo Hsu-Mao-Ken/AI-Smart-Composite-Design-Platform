@@ -1492,9 +1492,10 @@ def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plai
 
 
 import json
+import math
 
 # ==========================================
-# 2. 修改後的主程式介面 (包含穩健的參數讀取)
+# 2. 修改後的主程式介面 (加入高強度防呆與安全澄清機制)
 # ==========================================
 def run_LLM(user_query):
     print("="*60)
@@ -1518,17 +1519,65 @@ def run_LLM(user_query):
         # --- Step 2: LLM Parsing ---
         json_str = my_agent.parse_instruction(user_query, resin_options=r_opts, fiber_options=f_opts)
         
+        # ---------------------------------------------------------
+        # 🛡️ [防護機制啟動] 針對審查委員要求的高強度 JSON 驗證
+        # ---------------------------------------------------------
         try:
             params = json.loads(json_str)
         except json.JSONDecodeError:
             print(f"JSON Parsing Failed. Raw: {json_str}")
             return {
                 "task_type": "general_chat",
-                "reply": "抱歉，我無法理解您的指令格式，請再試一次。",
-                "params": {}, "data": None, "figure": None
+                "reply": "系統錯誤：無法解析您的指令格式，請用更清晰的語言再試一次。",
+                "params": {}, "data": None, "figure": None, "plotter": None
             }
 
+        # 1. 阻絕 JSON Array (必須是 dict)
+        if not isinstance(params, dict):
+            return {
+                "task_type": "general_chat",
+                "reply": "系統錯誤：接收到無效的陣列格式 (JSON Array)。請重新輸入指令。",
+                "params": {}, "data": None, "figure": None, "plotter": None
+            }
+
+        # 2. 阻絕 Empty Object (空物件)
+        if not params:
+            return {
+                "task_type": "general_chat",
+                "reply": "系統錯誤：接收到空指令 (Empty Object)。請提供更多具體的設計或預測細節。",
+                "params": {}, "data": None, "figure": None, "plotter": None
+            }
+
+        # 3. 過濾未知 Task Type
+        valid_tasks = ["prediction", "design", "general_chat"]
         task_type = params.get("task_type", "general_chat")
+        if task_type not in valid_tasks:
+            task_type = "general_chat"
+            params["reply"] = "無法辨識的任務類型。請明確指示您需要「預測性質」還是「最佳化設計」。"
+
+        # 4. 【核心修復】防止 Null 材料導致 PPO 啟動隨機環境 (Safe Clarification)
+        if task_type in ["prediction", "design"]:
+            resin_val = params.get("resin")
+            fiber_val = params.get("fiber")
+            
+            # 定義判斷無效材料的邏輯 (擋下 null, None, NaN, 空字串)
+            def is_invalid_mat(m):
+                if m is None: return True
+                if isinstance(m, str) and m.strip().lower() in ["nan", "null", "none", ""]: return True
+                if isinstance(m, float) and math.isnan(m): return True
+                return False
+                
+            if is_invalid_mat(resin_val) or is_invalid_mat(fiber_val):
+                print("⚠️ Safe Clarification Triggered: Material cannot be null/NaN.")
+                return {
+                    "task_type": "general_chat",
+                    "reply": "【安全澄清機制】我注意到您沒有指定（或提供了無效的）樹脂與纖維材料。為了避免系統進行無意義的隨機模擬，請明確告訴我要使用哪種樹脂與纖維？",
+                    "params": params, "data": None, "figure": None, "plotter": None
+                }
+        # ---------------------------------------------------------
+        # 🛡️ 防護機制結束
+        # ---------------------------------------------------------
+
         print(f"\n[Step 1] Intent Detected: {task_type.upper()}")
 
         # 準備回傳結構
@@ -1536,19 +1585,25 @@ def run_LLM(user_query):
             "task_type": task_type,
             "params": params,
             "data": None,
-            "figure": None,    # 用於 Matplotlib (2D 數據圖)
-            "plotter": None,   # 用於 PyVista (3D 模型)
+            "figure": None,
+            "plotter": None,
             "reply": params.get("reply", None)
         }
 
-        # --- 定義一個穩健的參數讀取小工具 ---
-        # 這能防止 float(None) 的錯誤
+        # --- 定義一個穩健的參數讀取小工具 (防範 NaN 與 None) ---
         def safe_get_float(dictionary, key, default_value):
             val = dictionary.get(key)
             if val is None:
                 return float(default_value)
+            # 處理字串型態的 "NaN"
+            if isinstance(val, str) and val.strip().lower() == "nan":
+                return float(default_value)
             try:
-                return float(val)
+                f_val = float(val)
+                # 處理浮點數的 NaN
+                if math.isnan(f_val):
+                    return float(default_value)
+                return f_val
             except (ValueError, TypeError):
                 return float(default_value)
 
@@ -1563,7 +1618,7 @@ def run_LLM(user_query):
             target = params.get("target", "max_stiffness")
             weave_style = params.get("weave", "plain")
             geo_dict = params.get("geo", {})
-            if geo_dict is None: geo_dict = {} # 防呆：如果 geo 是 None，設為空字典
+            if not isinstance(geo_dict, dict): geo_dict = {} # 防呆：確保 geo 一定是 dict
 
             resin_name = params.get("resin", "Epoxy")
             fiber_name = params.get("fiber", "Carbon")
@@ -1572,38 +1627,33 @@ def run_LLM(user_query):
             print(f"    Initial Point: {resin_name}/{fiber_name}, Geo={geo_dict}")
             
             # 執行最佳化
-            opt_metrics = optimize_composite(
-                target_type=target,
-                weave_style=weave_style,
-                geo_dict=geo_dict,
-                resin_name=resin_name,
-                fiber_name=fiber_name,
-                verbose=True
-            )
-            result_package["data"] = opt_metrics
-            
-            # [修正] 生成對應的 3D 模型 (使用最佳化後的參數)
-            try:
-                # **從最佳化結果中提取最終的幾何陣列 (預設給定一個安全陣列以防萬一)**
-                opt_geo = opt_metrics.get("optimized", {}).get("geo", [90.0, 1.0, 0.2])
-                opt_weave = opt_metrics.get("optimized", {}).get("weave", "plain")
+            if 'optimize_composite' in globals():
+                opt_metrics = optimize_composite(
+                    target_type=target,
+                    weave_style=weave_style,
+                    geo_dict=geo_dict,
+                    resin_name=resin_name,
+                    fiber_name=fiber_name,
+                    verbose=True
+                )
+                result_package["data"] = opt_metrics
                 
-                # **根據 opt_geo 的陣列順序 [angle, width, height] 取值**
-                a = float(opt_geo[0])
-                w = float(opt_geo[1])
-                h = float(opt_geo[2])
-                
-                # **更新 Print 訊息以方便在終端機除錯**
-                print(f"    Generating Optimized 3D Model (Angle:{a}°, Width:{w:.2f}, Height:{h:.2f}, Style:{opt_weave})...")
-                result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=opt_weave)
-            except Exception as e:
-                print(f"    Warning: Failed to generate optimized 3D model: {e}")
+                # 生成對應的 3D 模型
+                try:
+                    opt_geo = opt_metrics.get("optimized", {}).get("geo", [90.0, 1.0, 0.2])
+                    opt_weave = opt_metrics.get("optimized", {}).get("weave", "plain")
+                    a, w, h = float(opt_geo[0]), float(opt_geo[1]), float(opt_geo[2])
+                    print(f"    Generating Optimized 3D Model (Angle:{a}°, Width:{w:.2f}, Height:{h:.2f}, Style:{opt_weave})...")
+                    if 'generate_3d_woven_plotter' in globals():
+                        result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=opt_weave)
+                except Exception as e:
+                    print(f"    Warning: Failed to generate optimized 3D model: {e}")
 
         # === 分支 C: 物理預測 (Prediction) ===
         elif task_type == "prediction":
             weave_style = params.get("weave", "plain")
             geo_dict = params.get("geo", {})
-            if geo_dict is None: geo_dict = {} # 防呆
+            if not isinstance(geo_dict, dict): geo_dict = {} # 防呆
 
             resin_name = params.get("resin", "Epoxy")
             fiber_name = params.get("fiber", "Carbon")
@@ -1611,33 +1661,30 @@ def run_LLM(user_query):
             print(f"    Configuration: {resin_name}/{fiber_name}, Geo={geo_dict}")
             
             # 執行預測
-            eval_metrics, fig = evaluate_composite(
-                weave_style=weave_style, 
-                geo_dict=geo_dict, 
-                resin_name=resin_name, 
-                fiber_name=fiber_name, 
-                show_plot=True, 
-                verbose=True
-            )
-            result_package["data"] = eval_metrics
-            result_package["figure"] = fig 
-            
-            # [修正] 生成對應的 3D 模型 (加入防呆)
-            try:
-                w = safe_get_float(geo_dict, "width", 1.0)
-                h = safe_get_float(geo_dict, "height", 0.2)
+            if 'evaluate_composite' in globals():
+                eval_metrics, fig = evaluate_composite(
+                    weave_style=weave_style, 
+                    geo_dict=geo_dict, 
+                    resin_name=resin_name, 
+                    fiber_name=fiber_name, 
+                    show_plot=True, 
+                    verbose=True
+                )
+                result_package["data"] = eval_metrics
+                result_package["figure"] = fig 
                 
-                # 角度防呆邏輯
-                raw_angle = geo_dict.get("angle")
-                if raw_angle is None:
-                    raw_angle = params.get("angle")
-                
-                a = float(raw_angle) if raw_angle is not None else 90.0
-                
-                print(f"    Generating Prediction 3D Model ({a}°, Style:{weave_style})...")
-                result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=weave_style)
-            except Exception as e:
-                print(f"    Warning: Failed to generate 3D model: {e}")
+                # 生成對應的 3D 模型
+                try:
+                    w = safe_get_float(geo_dict, "width", 1.0)
+                    h = safe_get_float(geo_dict, "height", 0.2)
+                    raw_angle = geo_dict.get("angle") if geo_dict.get("angle") is not None else params.get("angle")
+                    a = float(raw_angle) if raw_angle is not None and str(raw_angle).lower() != "nan" else 90.0
+                    
+                    print(f"    Generating Prediction 3D Model ({a}°)...")
+                    if 'generate_3d_woven_plotter' in globals():
+                        result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=weave_style)
+                except Exception as e:
+                    print(f"    Warning: Failed to generate 3D model: {e}")
             
         return result_package
 
@@ -1645,7 +1692,7 @@ def run_LLM(user_query):
         print(f"Agent Error: {e}")
         return {
             "task_type": "general_chat",
-            "reply": f"系統發生錯誤: {str(e)}",
+            "reply": f"系統發生未預期錯誤: {str(e)}",
             "params": {}, "data": None, "figure": None, "plotter": None
         }
 
