@@ -39,7 +39,7 @@ To ensure full reproducibility, please note that the **Machine Learning / Web Ho
 The finite element data generation relies on commercial simulation software and is executed within its proprietary, self-contained environment.
 *   **Abaqus**: Version 2018 (Utilizes its internal Python 2.7 environment; no external `pip install` is required or supported).
 *   **TexGen**: Required for mesoscale geometric modeling.
-*   **Note**: While the core FEA logic depends on the internal Abaqus environment, the batch data generation process is orchestrated via standard Python. Specifically, standard Python scripts utilize the `os` module to programmatically issue execution instructions to the Abaqus Command Line, enabling automated, multi-instance simulation runs.
+*   **Note**: While the core FEA logic depends on the internal Abaqus environment, the batch data generation process is orchestrated via standard Python. Specifically, standard Python scripts utilize the `os` module to programmatically issue execution instructions to the Abaqus Command Line, enabling automated, multi-instance simulation runs. 
 
 ### 2. Machine Learning & Web Platform Environment (Python / GPU)
 This environment is used for training the CNN/PPO models and running the Streamlit web application. We provide a clean, deduplicated `requirements.txt` with fixed versions for visualization tools (`pyvista`, `vtk`, `trame`) and dependencies.
