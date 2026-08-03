@@ -59,7 +59,7 @@ While the provided Python scripts in this repository are syntactically valid, **
 
 1.  **Hugging Face Access Token (LLM Requirement)**
     *   The `Llama-3.1-8B-Instruct` model requires a verified Hugging Face token. 
-    *   **Action Required**: You must generate your own personal access token from Hugging Face and replace the placeholder in `LLM_composite_web_PPO_APP.py` (or set it as an environment variable) before running the LLM module.
+    *   **Action Required**: You must generate your own personal access token from Hugging Face and replace the placeholder in `LLM_composite_web_function_PPO_APP.py` (or set it as an environment variable) before running the LLM module.
 2.  **Local File Paths Configuration**
     *   Hardcoded absolute or relative paths in the scripts must be updated to match your local repository directory. 
     *   **Action Required**: Verify and modify the directory paths for `*.pth` (weights), `*.pkl` (scalers), and `*.csv` (databases) within the main scripts based on your local folder structure.
