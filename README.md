@@ -19,7 +19,7 @@ This repository contains the official implementation of the AI Woven Composite I
 
 ### Platform Application & Weights
 *   `LLM_composite_web_PPO_APP.py` & `LLM_composite_web_function_PPO_APP.py`: Main scripts for the web-based Intelligent Design Platform interface.
-*   `*.pth`: Pre-trained PyTorch model weights (e.g., `effective_model_pytorch_half.pth`, `plastic_model_pytorch.pth`, `ppo_best_model.pth`).
+*   `*.pth`: Pre-trained PyTorch model weights (e.g., `effective_model_pytorch.pth`, `plastic_model_pytorch.pth`, `ppo_best_model.pth`).
 *   `*.pkl`: Data scalers for normalizing inputs and inverse transforming outputs.
 *   `*.csv`: Material property databases (`fiber_material_property.csv`, `resin_material_property.csv`).
 
