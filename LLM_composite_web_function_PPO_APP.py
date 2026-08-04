@@ -1675,7 +1675,8 @@ def run_LLM(user_query):
                 "params": {}, "data": None, "figure": None, "plotter": None
             }
         except ValidationError as e:
-            error_msgs = [f"- {err['loc'][-1]}: {err['msg']}" for err in e.errors()]
+            # 加入 if err.get('loc') 避免空元組引發 tuple index out of range
+            error_msgs = [f"- {err['loc'][-1] if err.get('loc') else 'Parameter Error'}: {err['msg'].replace('Value error, ', '')}" for err in e.errors()]
             print("⚠️ Safe Clarification Triggered (Schema Validation Failed)")
             return {
                 "task_type": raw_dict.get("task_type", "error"), # 👈 保留原始判斷，不篡改
