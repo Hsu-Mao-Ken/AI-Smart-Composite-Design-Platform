@@ -9,13 +9,17 @@ import pyvista as pv
 pv.OFF_SCREEN = True
 
 
+# ==========================================
+# Streamlit Web UI (Layout Optimized & Safety Enhanced)
+# Filename: app.py
+# ==========================================
 import streamlit as st
 import pandas as pd
 import time
 import matplotlib.pyplot as plt 
 from stpyvista import stpyvista 
 
-from LLM_composite_web_function_PPO_APP import initialize_system, run_LLM
+from LLM_composite_web_function_PPO import initialize_system, run_LLM
 
 # 1. 頁面基本設定
 st.set_page_config(
@@ -82,8 +86,6 @@ chat_input_prompt = st.chat_input("Please enter your design requirements or ques
 final_prompt = button_prompt if button_prompt else chat_input_prompt
 
 if final_prompt:
-    # 【新增這行】在執行新的預測或設計前，強制清除之前殘留的 3D 繪圖記憶體快取
-    pv.close_all()
     st.chat_message("user").markdown(final_prompt)
     st.session_state.messages.append({"role": "user", "content": final_prompt})
 
@@ -100,12 +102,12 @@ if final_prompt:
                 message_placeholder.error("⚠️ Sorry, a system error occurred.")
                 response_content = "System error occurred."
             else:
-                task_type = result.get('task_type', 'general_chat')
+                task_type = result.get('task_type', 'error') # 預設改為 error
                 params = result.get('params', {})
                 data = result.get('data')
                 fig = result.get('figure')
                 plotter = result.get('plotter') 
-                reply_text = result.get('reply') 
+                reply_text = result.get('reply', '') 
                 
                 # 工具函數：格式化標籤與數值
                 def format_unit_label(label):
@@ -123,8 +125,15 @@ if final_prompt:
                 def format_scientific(val):
                     return f"{val:.4e}" if isinstance(val, (int, float)) else val
 
+                # ======================================================
+                # 🛡️ [核心修改 1] 優先處理安全攔截與系統錯誤
+                # ======================================================
+                if task_type == "error" or "【安全澄清機制】" in reply_text or "【系統錯誤】" in reply_text:
+                    message_placeholder.warning(f"🛡️ **System Notice**\n\n{reply_text}")
+                    response_content = reply_text
+
                 # [Case 1] 一般對話
-                if task_type == 'general_chat':
+                elif task_type == 'general_chat':
                     final_reply = reply_text if reply_text else "I'm not quite sure."
                     message_placeholder.markdown(final_reply)
                     response_content = final_reply
@@ -133,7 +142,12 @@ if final_prompt:
                 elif task_type == 'design':
                     display_tgt = params.get('target', 'Unknown').replace('max_', '').replace('_', ' ')
                     header_text = f"**✅ Task Completed! ({end_time - start_time:.2f}s)**\n\n"
-                    header_text += f"**Detected Intent:** `DESIGN` | **Target:** `{display_tgt}`"
+                    header_text += f"**Detected Intent:** `DESIGN` | **Target:** `{display_tgt}`\n\n"
+                    
+                    # [核心修改 2] 若有透明宣告 (如預設參數)，顯示給使用者看
+                    if reply_text:
+                        header_text += f"*{reply_text}*\n\n"
+                        
                     message_placeholder.markdown(header_text)
                     
                     st.divider()
@@ -146,8 +160,8 @@ if final_prompt:
                             opt_state = data['optimized']
                             df_compare = pd.DataFrame({
                                 "Parameter": ["Resin", "Fiber", "Weave", "Angle (°)", "Width (mm)", "Height (mm)", "Score"],
-                                "Initial": [init_state['resin'], init_state['fiber'], init_state['weave'], f"{init_state['geo'][0]:.2f}", f"{init_state['geo'][1]:.2f}", f"{init_state['geo'][2]:.2f}", f"{init_state['score']:.4e}"],
-                                "AI Optimized": [opt_state['resin'], opt_state['fiber'], opt_state['weave'], f"**{opt_state['geo'][0]:.2f}**", f"{opt_state['geo'][1]:.2f}", f"{opt_state['geo'][2]:.2f}", f"**{opt_state['score']:.4e}**"]
+                                "Initial": [init_state['resin'], init_state['fiber'], init_state['weave'], f"{init_state['geo'][0]:.1f}", f"{init_state['geo'][1]:.2f}", f"{init_state['geo'][2]:.2f}", f"{init_state['score']:.4e}"],
+                                "AI Optimized": [opt_state['resin'], opt_state['fiber'], opt_state['weave'], f"**{opt_state['geo'][0]:.1f}**", f"{opt_state['geo'][1]:.2f}", f"{opt_state['geo'][2]:.2f}", f"**{opt_state['score']:.4e}**"]
                             })
                             st.table(df_compare)
                             if opt_state['improvement_pct'] > 0:
@@ -159,12 +173,17 @@ if final_prompt:
                             plotter.window_size = [600, 350]
                             stpyvista(plotter, key=f"pv_design_{int(time.time())}")
                     
-                    response_content = f"Design task completed for {display_tgt}."
+                    response_content = f"Design task completed for {display_tgt}.\n\n{reply_text}"
 
                 # [Case 3] 預測任務
                 elif task_type == 'prediction':
                     header_text = f"**✅ Task Completed! ({end_time - start_time:.2f}s)**\n\n"
-                    header_text += f"**Detected Intent:** `PREDICTION`"
+                    header_text += f"**Detected Intent:** `PREDICTION`\n\n"
+                    
+                    # [核心修改 3] 若有透明宣告，顯示給使用者看
+                    if reply_text:
+                        header_text += f"*{reply_text}*\n\n"
+                        
                     message_placeholder.markdown(header_text)
                     
                     st.divider()
@@ -174,46 +193,42 @@ if final_prompt:
                         st.subheader("📊 Material Properties")
                         
                         if data and "elastic_modulus" in data and "plastic_props" in data:
-                            # 處理彈性資料
                             df_e = pd.DataFrame.from_dict(data['elastic_modulus'], orient='index', columns=['Value'])
                             df_e.index = df_e.index.map(format_unit_label)
                             df_e['Value'] = df_e['Value'].map(format_scientific)
                             
-                            # 處理塑性資料
                             df_p = pd.DataFrame.from_dict(data['plastic_props'], orient='index', columns=['Value'])
                             df_p.index = df_p.index.map(format_unit_label)
                             df_p['Value'] = df_p['Value'].map(format_scientific)
                             
-                            # 建立視覺分隔行 (標題列)
                             df_head_e = pd.DataFrame({"Value": [""]}, index=["[ Elastic Properties ]"])
                             df_head_p = pd.DataFrame({"Value": [""]}, index=["[ Plastic Characteristics ]"])
-                            df_space = pd.DataFrame({"Value": [""]}, index=[" "]) # 空白行
+                            df_space = pd.DataFrame({"Value": [""]}, index=[" "]) 
                             
-                            # 串接成單一 DataFrame 後一次性輸出，保證欄位完美對齊
                             df_combined = pd.concat([df_head_e, df_e, df_space, df_head_p, df_p])
                             st.table(df_combined)
 
                     with p_col2:
                         st.subheader("📈 Visual Analysis")
-                        
                         if fig:
                             st.markdown("#### Stress-Strain Curve")
-                            # **[修改核心 1] 調整曲線圖佔用比例，讓它變得更小 (由原本 4:2 改為 5.5:4.5)**
-                            # 左邊數字越小，圖表就被擠得越小
                             fig_col, _ = st.columns([6.0, 4.0]) 
                             with fig_col:
                                 st.pyplot(fig)
                         
                         if plotter:
                             st.markdown("#### 3D Woven Preview")
-                            # **[修改核心 2] 用嵌套欄位限制 3D 圖的寬度，解決拉伸問題**
-                            # 用 6:4 的比例限制 3D 圖，右側留白，強制壓縮 3D 圖寬度
                             pv_col, _ = st.columns([6.5, 3.5])
                             with pv_col:
                                 plotter.window_size = [400, 300]
                                 stpyvista(plotter, key=f"pv_pred_{int(time.time())}")
                     
-                    response_content = "Performance prediction task completed."
+                    response_content = f"Performance prediction task completed.\n\n{reply_text}"
+
+                # [Fallback] 未知狀態處理，避免 Crash
+                else:
+                    message_placeholder.error(f"⚠️ Unknown task type: {task_type}")
+                    response_content = f"Unknown task type: {task_type}"
 
         except Exception as e:
             message_placeholder.error(f"Unexpected error: {e}")
