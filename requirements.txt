@@ -28,7 +28,7 @@ matplotlib==3.10.8
 pillow==11.3.0
 stpyvista==0.1.4
 pyvista==0.46.5
-vtk==9.5.2
+vtk>=9.6.0
 trame>=3.0.0
 trame-vuetify>=2.0.0
 trame-vtk>=2.8.0
