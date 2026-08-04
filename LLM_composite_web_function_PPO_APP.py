@@ -1494,66 +1494,41 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 # ==========================================
 # 透過 Streamlit 的 secrets 功能讀取金鑰
 import streamlit as st
-YOUR_HF_TOKEN = st.secrets["HF_TOKEN"]
+from huggingface_hub import InferenceClient
+import re
 
+# 透過 Streamlit 的 secrets 功能讀取金鑰
+YOUR_HF_TOKEN = st.secrets["HF_TOKEN"]
 
 class LLMAgent:
     def __init__(self, hf_token):
-        # Using Llama 3.1
+        # 使用 Llama 3.1
         self.model_id = "meta-llama/Llama-3.1-8B-Instruct"
-        
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Initializing LLM Agent ({self.model_id})...")
-        print(f"Device detected: {self.device}")
+        print(f"Connecting to Hugging Face Inference API ({self.model_id})...")
 
         try:
-            # 1. Load Tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_id, 
-                token=hf_token
-            )
-            
-            # 2. Load Model (Standard Float16)
-            print("Loading model in Float16 mode (Requires ~16GB VRAM/RAM)...")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                dtype=torch.float16, 
-                device_map="auto",
-                token=hf_token
-            )
-            
-            # 3. Create Pipeline
-            self.pipe = pipeline(
-                "text-generation",
-                model=self.model,
-                tokenizer=self.tokenizer,
-                max_new_tokens=512, # [修改] 增加長度以容納對話回應
-                temperature=0.1,
-                do_sample=True
-            )
-            print("Success: Llama-3.1 Agent loaded.")
+            # [修改] 放棄本地載入，改用線上 InferenceClient
+            self.client = InferenceClient(model=self.model_id, token=hf_token)
+            print("Success: Llama-3.1 API Client connected.")
             
         except Exception as e:
-            print(f"Error loading LLM: {e}")
+            print(f"Error connecting to LLM API: {e}")
             print("Please check your Hugging Face token.")
-            self.pipe = None
+            self.client = None
 
-    # [修改] 增加 resin_options 和 fiber_options 參數
+    # 原本的 parse_instruction 也要配合 API 的呼叫方式進行修改
     def parse_instruction(self, user_text, resin_options=[], fiber_options=[]):
         """
-        Convert natural language to JSON string.
-        Enhanced to support General Chat and Material Awareness.
+        Convert natural language to JSON string via Hugging Face API.
         """
-        if not self.pipe:
+        if not self.client:
             return None
             
         # 1. 準備上下文資訊 (將材料轉為字串)
-        # 取前 20 個避免 Prompt 太長
         resin_str = ", ".join(str(r) for r in resin_options[:20]) if resin_options else "Standard Resins"
         fiber_str = ", ".join(str(f) for f in fiber_options[:20]) if fiber_options else "Standard Fibers"
 
-        # 2. 構建 System Prompt (使用 f-string 注入資料)
-        # 注意：JSON 的大括號在 f-string 中需要用雙大括號 {{ }} 跳脫
+        # 2. 構建 System Prompt (保持不變)
         system_prompt = f"""
         You are an intelligent AI assistant for Composite Material Design (Engineering Science).
         Your goal is to assist users in designing or predicting material properties using a deep learning surrogate model.
@@ -1564,7 +1539,7 @@ class LLMAgent:
 
         Your task is to analyze the user's input and output a strictly valid JSON object.
 
-         --- Rules for "task_type" ---
+        --- Rules for "task_type" ---
         1. "prediction": User asks to calculate, evaluate, or predict properties. (Classify as this EVEN IF parameters or materials are missing).
         2. "design": User asks to optimize, maximize, or design a composite for a target. (Classify as this EVEN IF parameters or materials are missing).
         3. "general_chat": ONLY for greetings, asking for material lists, or non-technical questions. Do NOT use this if the user wants to design or predict.
@@ -1595,26 +1570,29 @@ class LLMAgent:
             {"role": "user", "content": user_text},
         ]
 
-        # print("Agent is parsing instruction...")
-        outputs = self.pipe(
-            messages, 
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.eos_token_id
-        )
-        
-        generated_text = outputs[0]["generated_text"][-1]["content"]
-        
-        # Cleanup       
-        # [建議升級] 使用 Regex 嚴格提取 JSON 區塊：
-        import re
-        match = re.search(r'\{.*\}', generated_text, flags=re.DOTALL)
-        if match:
-            clean_json = match.group(0)
-        else:
-            # 作為 Fallback
-            clean_json = generated_text.replace("```json", "").replace("```", "").strip()
-                   
-        return clean_json
+        # [修改] 呼叫線上 API 進行對話生成
+        try:
+            response = self.client.chat_completion(
+                messages=messages,
+                max_tokens=512,
+                temperature=0.1
+            )
+            
+            # 從 API 回傳的物件中提取文字
+            generated_text = response.choices[0].message.content
+            
+            # 使用 Regex 嚴格提取 JSON 區塊
+            match = re.search(r'\{.*\}', generated_text, flags=re.DOTALL)
+            if match:
+                clean_json = match.group(0)
+            else:
+                clean_json = generated_text.replace("```json", "").replace("```", "").strip()
+                
+            return clean_json
+            
+        except Exception as e:
+            print(f"Hugging Face API Error: {e}")
+            return None
 
 
 import json
