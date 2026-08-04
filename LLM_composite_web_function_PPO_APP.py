@@ -10,27 +10,32 @@ import joblib
 import json
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
+
+# --- 2. Enhanced Search Function (包含高強度防呆與透明宣告) ---
 def get_material_params(name, material_type="fiber", verbose=True):
     """
     Find material parameters using keyword containment logic.
+    Enhanced to prevent silent overrides and handle NaN/Null safely.
     """
+    # [新增防呆 1] 阻絕無效輸入，避免 str(None) 變成 "none" 導致後續誤判
+    if name is None:
+        return None
+        
     # Pre-processing: 轉小寫、去頭尾空白
     query = str(name).lower().strip()
     
-    # --- A. Alias Mapping (關鍵字優先對照表) ---
-    # 重要: Python 3.7+ 字典有順序性。
-    # 請將「特徵較強」的關鍵字放在前面，「通用」的關鍵字放在後面。
-    # 這樣如果輸入 "Optical Epoxy"，會先對到 "Optical" 而對應到 CEL。
+    # [新增防呆 2] 擋下 LLM 可能產生的無效字串
+    if query in ["nan", "null", "none", ""]:
+        return None
     
+    # --- A. Alias Mapping (關鍵字優先對照表) ---
     alias_map = {
         # === 特殊樹脂 (Specific Resins) ===
-        # 對應 CEL-400 (透明/光學)
         "cel": "cel",
         "optical": "cel",
         "transparent": "cel",
         "clear": "cel",
         
-        # 對應 Plaskon (模塑/封裝/黑色)
         "plaskon": "plaskon",
         "molding": "plaskon",
         "compound": "plaskon",
@@ -38,25 +43,30 @@ def get_material_params(name, material_type="fiber", verbose=True):
         "emc": "plaskon",
         
         # === 通用樹脂 (Generic Resins) ===
-        # 對應 ELER (標準環氧) - 放在最後當作預設
         "eler": "eler",
         "epoxy": "eler",
         "resin": "eler",
         
         # === 纖維 (Fibers) ===
-        "glass": "e-glass",     # Glass -> E-glass
+        "glass": "e-glass",
         "fiberglass": "e-glass",
-        "t300": "carbon",       # T300 -> Carbon
+        "t300": "carbon",
         "graphite": "carbon"
     }
     
-    # 邏輯修正：改為「檢查是否包含」
+    # [防禦機制] 定義哪些字眼是「模糊/通用的」，需要向使用者透明宣告
+    generic_keywords = ["epoxy", "resin", "fiber", "compound"]
+    
     mapped_target = None
     for keyword, target in alias_map.items():
         if keyword in query:
-            # print(f"   [Alias] Input '{name}' contains keyword '{keyword}' -> Mapped to '{target}'")
             mapped_target = target
-            break # 找到第一個(權重最高的)關鍵字就停止，避免被後面的 generic 覆蓋
+            
+            # [核心修復] 如果觸發的是通用名詞，給出明確的透明宣告 (避免靜默取代)
+            if keyword in generic_keywords and verbose:
+                print(f"    [System Notice] User specified generic term '{keyword}'. Transparently defaulting to baseline '{target.upper()}'.")
+            
+            break # 找到第一個(權重最高的)關鍵字就停止
             
     # 如果有對應到別名，就用別名去搜尋；否則用原始輸入
     final_query = mapped_target if mapped_target else query
@@ -64,28 +74,25 @@ def get_material_params(name, material_type="fiber", verbose=True):
     # Select DataFrame
     if material_type == "fiber":
         df = df_fiber
-        col_name = df.columns[0] 
     else:
         df = df_resin
-        col_name = df.columns[0]
-    
+        
     if df.empty:
         return None
+        
+    col_name = df.columns[0] 
 
     # --- B. Database Search ---
-    # 使用最終決定的查詢詞 (final_query) 去資料庫找
-    
     match_row = None
     for idx, row in df.iterrows():
         db_name_str = str(row[col_name]).lower().strip()
         
-        # 1. 資料庫名稱 包含 查詢詞 (e.g., query="cel" in db="cel-400")
+        # 1. 資料庫名稱 包含 查詢詞
         if final_query in db_name_str:
             match_row = row
             break
             
-        # 2. 查詢詞 包含 資料庫名稱 (e.g., query="carbon t300" contains db="carbon")
-        # 避免匹配到太短的字串 (長度>2)
+        # 2. 查詢詞 包含 資料庫名稱 (長度需 > 2 避免誤判)
         if len(db_name_str) > 2 and db_name_str in final_query:
             match_row = row
             break
@@ -94,23 +101,33 @@ def get_material_params(name, material_type="fiber", verbose=True):
     if match_row is not None:
         match_name = match_row[col_name]
         if verbose:
-            print(f"Search Result [{material_type}]: Found '{match_name}'")
+            # 【修正】拔除 mapped_target is None 的限制，只要成功找到就印出確認訊息！
+            print(f"    Search Result [{material_type}]: Successfully matched and loaded '{match_name}'")
         return match_row.values[1:].astype(float)
     else:
-        print(f"Warning: No match found for {material_type} name '{name}' (searched as '{final_query}').")
+        if verbose:
+            print(f"    Warning: No exact or alias match found for {material_type} '{name}'.")
         return None
 
 def get_weave_pattern(style_name="plain", verbose=True):
     """
     功能: 根據名稱回傳編織矩陣 (0/1)
+    增強: 具備高強度防呆，拒絕靜默取代 (Silent Override)，遇錯回傳 None
     輸入 (Input): style_name (str) - plain, twill, satin
-    輸出 (Output): numpy array (25,)
+    輸出 (Output): numpy array (25,) 或 None
     """
-    style = style_name.lower().strip()
+    # 1. [防呆機制] 擋下 None 或浮點數 NaN，避免 .lower() 引發系統崩潰
+    if style_name is None:
+        return None
+        
+    style = str(style_name).lower().strip()
     
+    # 2. [防呆機制] 擋下 LLM 的常見幻覺字串
+    if style in ["nan", "null", "none", ""]:
+        return None
+        
     # 定義 5x5 的樣式 (1 = Weft over Warp, 0 = Warp over Weft)
     patterns = {
-        # 平紋 (Plain): 1/1 交錯
         "plain": [
             1, 0, 1, 0, 1,
             0, 1, 0, 1, 0,
@@ -118,116 +135,132 @@ def get_weave_pattern(style_name="plain", verbose=True):
             0, 1, 0, 1, 0,
             1, 0, 1, 0, 1
         ],
-        
-        # 斜紋 (Twill): 2/2 Twill (這也是標準的，對角線位移)
-        # 每一行向右移動一格
         "twill": [ 
-            1, 1, 0, 0, 0,  # Row 0
-            0, 1, 1, 0, 0,  # Row 1 (Shift 1)
-            0, 0, 1, 1, 0,  # Row 2 (Shift 1)
-            0, 0, 0, 1, 1,  # Row 3 (Shift 1)
-            1, 0, 0, 0, 1   # Row 4 (Wrap around) - 註: 5x5 做 2/2 Twill 邊界會剛好接不上，這是幾何限制
+            1, 1, 0, 0, 0,  
+            0, 1, 1, 0, 0,  
+            0, 0, 1, 1, 0,  
+            0, 0, 0, 1, 1,  
+            1, 0, 0, 0, 1   
         ],
-        
-        # 緞紋 (Satin): 5-Harness Satin (Counter = 2)
-        # 這是紡織學上標準的 5枚緞紋
         "satin": [ 
-            0, 0, 1, 0, 0,  # (0,0)
-            1, 0, 0, 0, 0,  # (1,2)
-            0, 0, 0, 1, 0,  # (2,4)
-            0, 1, 0, 0, 0,  # (3,1)
-            0, 0, 0, 0, 1   # (4,3)
+            0, 0, 1, 0, 0,  
+            1, 0, 0, 0, 0,  
+            0, 0, 0, 1, 0,  
+            0, 1, 0, 0, 0,  
+            0, 0, 0, 0, 1   
         ]
     }
     
+    # 3. [嚴格驗證] 只有在字典裡的才放行，否則回傳 None 觸發澄清機制
     if style in patterns:
         if verbose:
-            print(f"Weave Style Selected: {style}")
+            print(f"    Search Result [weave]: Successfully loaded '{style}' pattern.")
         return np.array(patterns[style], dtype=float)
     else:
-        print(f"Warning: Unknown style '{style}'. Defaulting to 'plain'.")
-        return np.array(patterns["plain"], dtype=float)
+        if verbose:
+            # 拔除靜默取代 (Defaulting to plain)，改為警告並回傳 None
+            print(f"    Warning: Unknown weave style '{style_name}'. Rejecting silent override.")
+        return None
+
+import math
+import numpy as np
 
 def get_geometry_params(user_geo_dict=None, verbose=True):
     """
     功能: 生成幾何參數向量 (含角度轉換與間距自動計算)
-    修正: 
-      1. 增加對 None 值的檢查
-      2. 修正高度限制為固定的 0.1 ~ 0.4 mm，移除與寬度的連動限制
+    增強: 拔除 np.clip 靜默取代，加入嚴格邊界驗證與缺失值透明宣告
     """
-    # 1. 定義預設值 (Defaults)
+    # 1. 定義預設值 (Defaults) 與 合法範圍 (Bounds)
     defaults = {
         "angle": 90.0,
-        "yarn_width": 0.6,
-        "yarn_height": 0.2
+        "width": 0.6,
+        "height": 0.2
+    }
+    
+    bounds = {
+        "angle": (30.0, 90.0),
+        "width": (0.2, 1.0),
+        "height": (0.1, 0.4)
     }
     
     # 2. 定義別名對照表
     alias_map = {
-        "width": "yarn_width",
-        "w": "yarn_width",
-        "height": "yarn_height",
-        "h": "yarn_height",
+        "yarn_width": "width",
+        "w": "width",
+        "yarn_height": "height",
+        "h": "height",
         "deg": "angle",
         "degree": "angle"
     }
 
-    # 複製預設值作為起點
-    user_input = defaults.copy()
-    
-    if user_geo_dict:
-        # A. 預處理: 轉小寫、處理別名
-        clean_dict = {}
+    # --- 3. 提取與清洗輸入值 ---
+    clean_dict = {}
+    if user_geo_dict and isinstance(user_geo_dict, dict):
         for k, v in user_geo_dict.items():
             k_lower = str(k).lower().strip()
             real_key = alias_map.get(k_lower, k_lower)
             clean_dict[real_key] = v
+
+    final_geo = {}
+    
+    # --- 4. 數值驗證與透明宣告 (取代靜默代入) ---
+    for key, default_val in defaults.items():
+        val = clean_dict.get(key)
+        
+        # 狀況 A: 缺失值或 LLM 幻覺字串 (None, NaN) -> 進行透明宣告並代入基準
+        if val is None or str(val).strip().lower() in ["nan", "null", "none", ""]:
+            if verbose:
+                print(f"    [System Notice] Geometry '{key}' not provided. Transparently defaulting to {default_val}.")
+            final_geo[key] = default_val
+            continue
             
-        # B. 更新數值 (檢查 val 是否為 None)
-        for key, val in clean_dict.items():
-            if key in user_input:
-                if val is not None:
-                    try:
-                        user_input[key] = float(val)
-                    except (ValueError, TypeError):
-                        print(f"Warning: Invalid value for {key}: {val}. Using default.")
-                else:
-                    pass
+        # 狀況 B: 數值解析
+        try:
+            f_val = float(val)
+            if math.isnan(f_val):
+                raise ValueError("Value is NaN")
+            final_geo[key] = f_val
+        except (ValueError, TypeError):
+            if verbose:
+                print(f"    Warning: Invalid format for '{key}' ('{val}'). Rejecting silent override.")
+            return None # 拒絕靜默代入，直接回傳 None 觸發外部澄清
 
-    # --- 3. 數值範圍檢查 (修正重點) ---
-    u_angle = np.clip(user_input["angle"], 30.0, 90.0)
-    
-    # 寬度限制: 0.2 ~ 1.0
-    width = np.clip(user_input["yarn_width"], 0.2, 1.0)
-    
-    # 高度限制: 0.1 ~ 0.4 (獨立限制，不依賴寬度)
-    height = np.clip(user_input["yarn_height"], 0.1, 0.4)
+    # --- 5. 嚴格範圍檢查 (拔除 np.clip) ---
+    for key, (min_val, max_val) in bounds.items():
+        if not (min_val <= final_geo[key] <= max_val):
+            if verbose:
+                print(f"    Warning: Geometry '{key}' value {final_geo[key]} is OUT OF BOUNDS [{min_val}, {max_val}]. Rejecting evaluation.")
+            return None # 發現超出物理極限，直接阻斷，交由 Pydantic 或外部去報錯
 
-    # --- 4. 計算模型參數 ---
+    # --- 6. 計算模型參數 ---
+    u_angle = final_geo["angle"]
+    width = final_geo["width"]
+    height = final_geo["height"]
+
     # 模型訓練時使用的是與 90 度的夾角差 (0~60)
     model_angle = abs(u_angle - 90.0)
     
-    # 間距計算公式 (維持不變)
-    # multiplier = 1.5 + (u_angle - 90) * (-0.025)
-    # space = width * multiplier
+    # 間距計算公式
     multiplier = 1.5 + (u_angle - 90.0) * (-0.025)
     space = width * multiplier
     
-    # --- 5. 輸出確認 ---
+    # --- 7. 輸出確認 ---
     if verbose:
-        print(f"Geometry Processing:")
-        print(f"  - Effective Config: Angle={u_angle}, Width={width}, Height={height}")
-        print(f"  - User Angle: {u_angle:.1f}° -> Model Angle: {model_angle:.1f}°")
-        print(f"  - Space: {space:.3f} mm (Multiplier: {multiplier:.2f}x)")
+        print(f"    Geometry Processing:")
+        print(f"      - Effective Config: Angle={u_angle:.1f}°, Width={width:.2f}, Height={height:.2f}")
+        print(f"      - Model Input Angle: {model_angle:.1f}°")
+        print(f"      - Space: {space:.3f} mm (Multiplier: {multiplier:.2f}x)")
 
     ordered_values = [model_angle, width, height, space]
     return np.array(ordered_values, dtype=float)
 
 class EffectiveModel(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(EffectiveModel, self).__init__()
 
-        # --- 1. Image Branch (圖像路徑) ---
+        # ==========================================
+        # 1. Image Branch (維持不變)
+        # ==========================================
         self.conv1 = nn.Conv2d(in_channels=1, out_channels=3, kernel_size=2, stride=2, padding=1)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(in_channels=3, out_channels=3, kernel_size=2, stride=2, padding=1)
@@ -238,8 +271,6 @@ class EffectiveModel(nn.Module):
         
         self.flatten = nn.Flatten()
         
-        # [修正點 1] 這裡原本是 2*2*2=8，但根據錯誤訊息，PyTorch 實際算出來是 18
-        # 所以我們直接改成 18 讓它通過
         self.img_dense_block = nn.Sequential(
             nn.Linear(18, 960), 
             nn.ReLU(),
@@ -251,46 +282,47 @@ class EffectiveModel(nn.Module):
             nn.ReLU()
         )
 
-        # --- 2. Info Branch (性質路徑) ---
+        # ==========================================
+        # 2. Info Branch (維持不變)
+        # ==========================================
         self.info_dense_block = nn.Sequential(
-            nn.Linear(21, 64),
+            nn.Linear(21, 64), 
             nn.ReLU(),
             nn.Linear(64, 48),
             nn.ReLU(),
             nn.Linear(48, 36),
             nn.ReLU(),
-            nn.Linear(36, 24),
+            nn.Linear(36, 24), 
             nn.ReLU()
         )
 
-        # --- 3. Combined Path (結合後路徑) ---
-        self.c_conv1 = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=2, stride=1, padding=0)
-        self.c_conv2 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=2, stride=1, padding=1)
-        self.c_conv3 = nn.Conv2d(in_channels=16, out_channels=12, kernel_size=2, stride=1, padding=1)
+        # ==========================================
+        # 3. Combined Path (重大修改)
+        # ==========================================
+        # 這裡不再轉回圖片，而是使用 MLP 直接融合
+        # 輸入維度: 120 (Image特徵) + 24 (Info特徵) = 144
         
-        # [修正點 2] 預防下一個錯誤
-        # 經過計算，PyTorch 的 padding=1 會讓尺寸稍微變大：
-        # Input 12x12 -> c_conv1(valid) -> 11x11
-        # 11x11 -> c_conv2(pad=1) -> 12x12
-        # 12x12 -> c_conv3(pad=1) -> 13x13
-        # 所以最終 Flatten 大小是：12 (channels) * 13 * 13 = 2028
         self.final_dense_block = nn.Sequential(
-            nn.Linear(12 * 13 * 13, 1920), 
+            # Layer 1: 144 -> 512
+            nn.Linear(144, 512),
             nn.ReLU(),
-            nn.Linear(1920, 960),
+            nn.Dropout(0.1),       # [優化] 防止過擬合
+            
+            # Layer 2: 512 -> 256
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(960, 480),
+            
+            # Layer 3: 256 -> 128
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(480, 240),
-            nn.ReLU(),
-            nn.Linear(240, 120),
-            nn.ReLU(),
-            nn.Linear(120, 12)
+           
+            # Output Layer: 128 -> 40
+            # 輸出 20 個點的 (Stress, Strain) 座標
+            nn.Linear(128, 12)
         )
 
     def forward(self, img_input, info_input):
-        # 轉置圖片維度 (Batch, 5, 5, 1) -> (Batch, 1, 5, 5)
+        # --- Image Branch ---
         if img_input.shape[-1] == 1: 
             x1 = img_input.permute(0, 3, 1, 2)
         else:
@@ -304,27 +336,17 @@ class EffectiveModel(nn.Module):
         x1 = self.pool1(x1)
         x1 = self.flatten(x1)
         
-        # Debug: 如果未來改參數又報錯，請取消下面這行註解看實際形狀
-        # print(f"x1 shape: {x1.shape}")
+        x1 = self.img_dense_block(x1) # Output: (Batch, 120)
         
-        x1 = self.img_dense_block(x1)
+        # --- Info Branch ---
+        x2 = self.info_dense_block(info_input) # Output: (Batch, 24)
 
-        x2 = self.info_dense_block(info_input)
-
-        combined = torch.cat((x1, x2), dim=1)
+        # --- Combined Path ---
+        # 1. 拼接
+        combined = torch.cat((x1, x2), dim=1) # Shape: (Batch, 144)
         
-        # Reshape: 144 -> 12x12 image
-        combined = combined.view(-1, 1, 12, 12)
-
-        c = self.relu(self.c_conv1(combined))
-        c = self.relu(self.c_conv2(c))
-        c = self.relu(self.c_conv3(c))
-        c = self.flatten(c)
-        
-        # Debug: 如果未來改參數又報錯，請取消下面這行註解看實際形狀
-        # print(f"c shape: {c.shape}")
-        
-        output = self.final_dense_block(c)
+        # 2. [修改點] 直接進入 MLP，不再 reshape 也不再做卷積
+        output = self.final_dense_block(combined)
         
         return output
     
@@ -412,9 +434,8 @@ class DualPredictor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Initializing Predictor on {self.device}...")
         
-        # 定義檔案路徑 (請確認檔名與您截圖中的一致)
         self.paths = {
-            "eff_model": "effective_model_pytorch_half.pth",
+            "eff_model": "effective_model_pytorch.pth",
             "eff_in": "effective_input_scaler.pkl",
             "eff_out": "effective_output_scaler.pkl",
             "pla_model": "plastic_model_pytorch.pth",
@@ -425,7 +446,6 @@ class DualPredictor:
         # --- 載入 Effective System (彈性) ---
         try:
             self.model_eff = EffectiveModel().to(self.device) 
-            # 這裡加了 strict=False 是為了容錯，建議最好還是讓架構完全一致
             self.model_eff.load_state_dict(torch.load(self.paths["eff_model"], map_location=self.device))
             self.model_eff.eval()
             self.scaler_eff_in = joblib.load(self.paths["eff_in"])
@@ -438,9 +458,8 @@ class DualPredictor:
         # --- 載入 Plastic System (塑性) ---
         try:
             self.model_pla = PlasticModel().to(self.device)
-            # 載入您剛剛訓練好的權重
             self.model_pla.load_state_dict(torch.load(self.paths["pla_model"], map_location=self.device))
-            self.model_pla.eval() # 確保 Dropout 關閉
+            self.model_pla.eval()
             self.scaler_pla_in = joblib.load(self.paths["pla_in"])
             self.scaler_pla_out = joblib.load(self.paths["pla_out"])
             print("Plastic Model loaded.")
@@ -455,42 +474,57 @@ class DualPredictor:
         fiber_vec = get_material_params(fiber_name, "fiber") 
         resin_vec_full = get_material_params(resin_name, "resin")
 
-        if resin_vec_full is None or fiber_vec is None:
-            return {"error": "Material not found"}
+        # ---------------------------------------------------------
+        # 🛡️ [防護機制] 全面攔截底層回傳的 None，避免張量運算崩潰
+        # ---------------------------------------------------------
+        if weave_vec is None:
+            return {"error": f"Invalid weave style: '{weave_style}'"}
+        if geo_vec is None:
+            return {"error": "Invalid or out-of-bounds geometry parameters."}
+        if resin_vec_full is None:
+            return {"error": f"Resin material not found: '{resin_name}'"}
+        if fiber_vec is None:
+            return {"error": f"Fiber material not found: '{fiber_name}'"}
 
         results = {}
 
         # 2. 預測 - 彈性模型
         if self.model_eff:
-            # 切片: 取前 3 個 (E, v, CTE)
-            resin_vec_eff = resin_vec_full[:3] 
-            info_raw = np.concatenate([geo_vec, resin_vec_eff, fiber_vec])
-            
-            # 預處理
-            info_scaled = self.scaler_eff_in.transform(info_raw.reshape(1, -1))
-            img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
-            info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
-            
-            with torch.no_grad():
-                pred_scaled = self.model_eff(img_tensor, info_tensor)
-                pred_final = self.scaler_eff_out.inverse_transform(pred_scaled.cpu().numpy())
-            results["elastic"] = pred_final.flatten()
+            try:
+                # 切片: 取前 3 個 (E, v, CTE)
+                resin_vec_eff = resin_vec_full[:3] 
+                info_raw = np.concatenate([geo_vec, resin_vec_eff, fiber_vec])
+                
+                # 預處理
+                info_scaled = self.scaler_eff_in.transform(info_raw.reshape(1, -1))
+                img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
+                info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
+                
+                with torch.no_grad():
+                    pred_scaled = self.model_eff(img_tensor, info_tensor)
+                    pred_final = self.scaler_eff_out.inverse_transform(pred_scaled.cpu().numpy())
+                results["elastic"] = pred_final.flatten()
+            except Exception as e:
+                return {"error": f"Effective model inference failed: {str(e)}"}
 
         # 3. 預測 - 塑性模型
         if self.model_pla:
-            # 切片: 取全部 (包含塑性參數)
-            resin_vec_pla = resin_vec_full[:] 
-            info_raw = np.concatenate([geo_vec, resin_vec_pla, fiber_vec])
-            
-            # 預處理
-            info_scaled = self.scaler_pla_in.transform(info_raw.reshape(1, -1))
-            img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
-            info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
-            
-            with torch.no_grad():
-                pred_scaled = self.model_pla(img_tensor, info_tensor)
-                pred_final = self.scaler_pla_out.inverse_transform(pred_scaled.cpu().numpy())
-            results["plastic"] = pred_final.flatten()
+            try:
+                # 切片: 取全部 (包含塑性參數)
+                resin_vec_pla = resin_vec_full[:] 
+                info_raw = np.concatenate([geo_vec, resin_vec_pla, fiber_vec])
+                
+                # 預處理
+                info_scaled = self.scaler_pla_in.transform(info_raw.reshape(1, -1))
+                img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
+                info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
+                
+                with torch.no_grad():
+                    pred_scaled = self.model_pla(img_tensor, info_tensor)
+                    pred_final = self.scaler_pla_out.inverse_transform(pred_scaled.cpu().numpy())
+                results["plastic"] = pred_final.flatten()
+            except Exception as e:
+                return {"error": f"Plastic model inference failed: {str(e)}"}
             
         return results
 
@@ -552,6 +586,9 @@ def find_smart_yield_point(stress, strain):
     return None, None, "No Yield Found (Linear)", debug_info
 
 
+import numpy as np
+import matplotlib.pyplot as plt
+
 # ==========================================
 # Main Function: Composite Evaluation
 # (Modified to return Figure object for Web UI)
@@ -559,15 +596,13 @@ def find_smart_yield_point(stress, strain):
 def evaluate_composite(weave_style, geo_dict, resin_name, fiber_name, show_plot=True, verbose=True):
     """
     接收設計參數，執行預測，計算物理性質。
+    增強: 拒絕靜默失敗，遇到錯誤主動拋出例外 (Raise Exception)，並加入數學防呆
     回傳: (metrics, fig)
-      - metrics: 物理性質字典
-      - fig: Matplotlib Figure 物件 (若 show_plot=False 則為 None)
     """
     
     # 檢查預測器
     if 'predictor' not in globals():
-        print("[ERROR] 'predictor' is not initialized.")
-        return None, None
+        raise RuntimeError("Predictor is not initialized. Please load the DualPredictor first.")
 
     # 1. 執行預測
     if verbose:
@@ -575,9 +610,9 @@ def evaluate_composite(weave_style, geo_dict, resin_name, fiber_name, show_plot=
     
     results = predictor.predict(weave_style, geo_dict, resin_name, fiber_name)
     
+    # 🛡️ [核心防禦 1] 拒絕靜默失敗：如果底層預測出錯，直接拋出 ValueError 讓外層 LLM 轉成對話警告！
     if "error" in results:
-        if verbose: print(f"[ERROR] Prediction failed: {results['error']}")
-        return None, None
+        raise ValueError(f"Backend Evaluation Failed: {results['error']}")
 
     # 準備回傳結構
     metrics = {
@@ -618,9 +653,12 @@ def evaluate_composite(weave_style, geo_dict, resin_name, fiber_name, show_plot=
         # --- 使用智慧搜尋找降伏點 ---
         y_str, y_eps, method_name, debug = find_smart_yield_point(stress, strain)
         
-        # 計算其他指標
-        slope_elastic = (stress[1] - stress[0]) / (strain[1] - strain[0]) if len(strain)>1 else 0
-        slope_plastic = (stress[-1] - stress[-2]) / (strain[-1] - strain[-2]) if len(strain)>1 else 0
+        # 🛡️ [核心防禦 2] 預防除以零 (ZeroDivisionError) 導致網頁崩潰
+        dx_elastic = (strain[1] - strain[0]) if len(strain) > 1 else 0
+        slope_elastic = (stress[1] - stress[0]) / dx_elastic if dx_elastic != 0 else 0.0
+        
+        dx_plastic = (strain[-1] - strain[-2]) if len(strain) > 1 else 0
+        slope_plastic = (stress[-1] - stress[-2]) / dx_plastic if dx_plastic != 0 else 0.0
         
         if hasattr(np, 'trapezoid'):
             energy_density = np.trapezoid(stress, strain)
@@ -650,9 +688,8 @@ def evaluate_composite(weave_style, geo_dict, resin_name, fiber_name, show_plot=
                 print(f"  > Yield Strength      : Not Found (Linear within 0.05%)")
             print("-" * 55)
 
-        # 4. 繪圖邏輯 (修改為適合網頁排版的原生大小)
+        # 4. 繪圖邏輯
         if show_plot:
-            # [修改 1] 直接在生成時指定較小的比例 (例如 5.5 x 3.5)，讓原生的文字與圖表比例最完美
             fig, ax = plt.subplots(figsize=(5.5, 3.5))
             
             # 1. 主曲線
@@ -666,29 +703,19 @@ def evaluate_composite(weave_style, geo_dict, resin_name, fiber_name, show_plot=
                 if "Intersection" in method_name and debug:
                     x_range = np.linspace(0, np.max(strain)*1.1, 100)
                     
-                    # 綠色虛線: 彈性延伸
                     y_elas = debug["slope_elastic"] * x_range 
                     ax.plot(x_range, y_elas, 'g--', alpha=0.4, linewidth=1, label="Elastic Ext.")
                     
-                    # 藍色虛線: 塑性延伸
                     y_plas = debug["slope_plastic"] * x_range + debug["intercept_plastic"]
                     ax.plot(x_range, y_plas, 'b--', alpha=0.4, linewidth=1, label="Plastic Ext.")
 
-            # [修改 2] 縮小標題與標籤的字體大小，配合縮小後的畫布
             ax.set_title(f"Predicted Stress-Strain ({weave_style})", fontsize=11)
             ax.set_xlabel("Strain (-)", fontsize=9)
             ax.set_ylabel("Stress (Pa)", fontsize=9)
             ax.grid(True, linestyle='--', alpha=0.6)
-            
-            # [修改 3] 將圖例縮小，避免擋住曲線
             ax.legend(fontsize=8, loc='best')
-            
-            # [修改 4] 加入 tight_layout 自動切除多餘白邊
             fig.tight_layout()
             
-            # [修改 5] 移除 plt.show() 與 plt.close(fig) 的邏輯。
-            # 因為要將 fig 傳遞給 Streamlit 渲染，絕對不能在這裡 close 掉，否則會破壞物件。
-
     return metrics, fig
 
 # ==========================================
@@ -726,29 +753,43 @@ class PlasticPredictor:
         fiber_vec = get_material_params(fiber_name, "fiber", verbose=False) 
         resin_vec_full = get_material_params(resin_name, "resin", verbose=False)
 
-        if resin_vec_full is None or fiber_vec is None:
-            return {"error": "Material not found"}
+        # ---------------------------------------------------------
+        # 🛡️ [防護機制] 全面攔截底層回傳的 None，避免張量運算崩潰
+        # ---------------------------------------------------------
+        if weave_vec is None:
+            return {"error": f"Invalid weave style: '{weave_style}'"}
+        if geo_vec is None:
+            return {"error": "Invalid or out-of-bounds geometry parameters."}
+        if resin_vec_full is None:
+            return {"error": f"Resin material not found: '{resin_name}'"}
+        if fiber_vec is None:
+            return {"error": f"Fiber material not found: '{fiber_name}'"}
 
         results = {}
 
-        
         # 2. 預測 - 塑性模型
         if self.model_pla:
-            # 切片: 取全部 (包含塑性參數)
-            resin_vec_pla = resin_vec_full[:] 
-            info_raw = np.concatenate([geo_vec, resin_vec_pla, fiber_vec])
-            
-            # 預處理
-            info_scaled = self.scaler_pla_in.transform(info_raw.reshape(1, -1))
-            img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
-            info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
-            
-            with torch.no_grad():
-                pred_scaled = self.model_pla(img_tensor, info_tensor)
-                pred_final = self.scaler_pla_out.inverse_transform(pred_scaled.cpu().numpy())
-            results["plastic"] = pred_final.flatten()
+            try:
+                # 切片: 取全部 (包含塑性參數)
+                resin_vec_pla = resin_vec_full[:] 
+                info_raw = np.concatenate([geo_vec, resin_vec_pla, fiber_vec])
+                
+                # 預處理
+                info_scaled = self.scaler_pla_in.transform(info_raw.reshape(1, -1))
+                img_tensor = torch.tensor(weave_vec.reshape(1, 1, 5, 5), dtype=torch.float32).to(self.device)
+                info_tensor = torch.tensor(info_scaled, dtype=torch.float32).to(self.device)
+                
+                with torch.no_grad():
+                    pred_scaled = self.model_pla(img_tensor, info_tensor)
+                    pred_final = self.scaler_pla_out.inverse_transform(pred_scaled.cpu().numpy())
+                results["plastic"] = pred_final.flatten()
+            except Exception as e:
+                # 捕捉神經網路推理時的意外錯誤
+                return {"error": f"Plastic model inference failed: {str(e)}"}
             
         return results
+    
+
 
 class CompositeEnvPPO:
     def __init__(self, predictor, df_resin, df_fiber):
@@ -946,10 +987,14 @@ class CompositeEnvPPO:
             "height": height
         }
         
-        result = self.predictor.predict(weave_name, geo_dict, resin_name, fiber_name)
+        try:
+            result = self.predictor.predict(weave_name, geo_dict, resin_name, fiber_name)
+        except Exception:
+            # 萬一底層預測器拋出例外，RL 環境不能崩潰，而是給 0 分當作嚴厲懲罰
+            return 0.0
         
         if "error" in result or "plastic" not in result:
-            return 0.0
+            return 0.0 # 代理人提出無效參數，回傳 0 分予以懲罰
             
         plastic_data = result["plastic"]
         stress = plastic_data[0::2]
@@ -958,15 +1003,28 @@ class CompositeEnvPPO:
         val = 0.0
         
         if self.current_target == 0: # Max Energy
-            val = np.trapezoid(stress, strain)
+            # [修復] 相容不同 Numpy 版本的積分函數
+            if hasattr(np, 'trapezoid'):
+                val = np.trapezoid(stress, strain)
+            else:
+                val = np.trapz(stress, strain)
+                
         elif self.current_target == 1: # Max Stiffness
+            # [修復] 預防除以零 (ZeroDivisionError)
             if len(strain) > 1:
-                val = (stress[1] - stress[0]) / (strain[1] - strain[0])
+                dx = strain[1] - strain[0]
+                if dx != 0:
+                    val = (stress[1] - stress[0]) / dx
+                else:
+                    val = 0.0
+                    
         elif self.current_target == 2: # Max Yield
             try:
-                y_str, _, _, _ = find_smart_yield_point(stress, strain) # 確保外部有此函數
-                if y_str: val = y_str
-            except:
+                # 確保外部有此函數，並捕捉可能的例外
+                if 'find_smart_yield_point' in globals():
+                    y_str, _, _, _ = find_smart_yield_point(stress, strain)
+                    if y_str: val = y_str
+            except Exception:
                 val = 0.0
                 
         return val
@@ -1092,11 +1150,14 @@ class PPOActorCritic(nn.Module):
         geo_std = self.geo_log_std.exp().expand_as(geo_mean)
         dist_geo = Normal(geo_mean, geo_std)
         
-        # 解析傳入的 action_tensor [Weave, Resin, Fiber, Geo(3)]
-        action_weave = action_tensor[:, 0]
-        action_resin = action_tensor[:, 1]
-        action_fiber = action_tensor[:, 2]
-        action_geo = action_tensor[:, 3:6]
+        # ---------------------------------------------------------
+        # 🛡️ [防護機制] 強制轉型為 LongTensor，避免 Categorical 崩潰
+        # ---------------------------------------------------------
+        action_weave = action_tensor[:, 0].long()
+        action_resin = action_tensor[:, 1].long()
+        action_fiber = action_tensor[:, 2].long()
+        # 幾何參數保持 FloatTensor 即可
+        action_geo = action_tensor[:, 3:6] 
         
         # 計算 Log Prob
         action_logprobs = (dist_weave.log_prob(action_weave) + 
@@ -1115,6 +1176,10 @@ class PPOActorCritic(nn.Module):
         return action_logprobs, state_values, dist_entropy
     
     
+import torch
+import numpy as np
+import os
+
 # ==========================================
 # 2. Updated PPO Optimization Helper (為 LLM 串接設計)
 # ==========================================
@@ -1125,30 +1190,31 @@ def optimize_composite(
     resin_name,        # e.g. "Epoxy"
     fiber_name,        # e.g. "Carbon"
     model_path="ppo_best_model.pth", 
-    max_steps=3,       # PPO 給絕對值，1步即達最佳解，預設跑3步確認穩定性
+    max_steps=5,       # PPO 給絕對值，1步即達最佳解，預設跑5步確認穩定性
     verbose=True       
 ):
     """
     接收手動定義的初始參數，使用 PPO 直接給出該目標下的最佳設計。
+    增強: 拒絕靜默失敗與靜默取代，嚴格驗證邊界並拋出例外。
     """
     
-    # 0. 檢查環境依賴
+    # 0. 檢查環境依賴 (拒絕靜默失敗，主動拋出錯誤)
     if 'env' not in globals():
-        print("[ERROR] 'env' (CompositeEnvPPO) is not initialized in globals().")
-        return None
+        raise RuntimeError("PPO Environment ('env') is not initialized.")
     if 'PPOActorCritic' not in globals():
-        print("[ERROR] 'PPOActorCritic' class is not defined.")
-        return None
+        raise RuntimeError("'PPOActorCritic' class is not defined.")
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # --- 內部 Helper: 搜尋邏輯 (與 get_material_params 保持一致) ---
+    # --- 內部 Helper: 搜尋邏輯 ---
     def find_index_smartly(user_input, option_list, material_type="fiber"):
+        if user_input is None or str(user_input).strip().lower() in ["nan", "null", "none", ""]:
+            return None
+            
         if user_input in option_list:
             return option_list.index(user_input)
             
         query = str(user_input).lower().strip()
-        
         alias_map = {
             "cel": "cel", "optical": "cel", "transparent": "cel", "clear": "cel",
             "plaskon": "plaskon", "molding": "plaskon", "compound": "plaskon", "smt": "plaskon", "emc": "plaskon",
@@ -1190,46 +1256,56 @@ def optimize_composite(
         policy.load_state_dict(torch.load(model_path, map_location=device))
         policy.eval() # 評估模式，鎖定 Dropout/BatchNorm
     else:
-        print("[ERROR] No model file found. Cannot optimize.")
-        return None
+        # 拒絕靜默失敗
+        raise FileNotFoundError("No PPO model file found. Cannot perform optimization.")
 
     # 2. 強制設定環境至「使用者指定的初始狀態」
     state = env.reset(target_type=target_type)
     
-    # (A) 設定編織
+    # 🛡️ (A) 設定編織 (拒絕靜默取代)
     if weave_style in env.weave_options:
         env.cur_weave_idx = env.weave_options.index(weave_style)
     else:
-        print(f"[Warning] Weave '{weave_style}' not found. Using default.")
+        raise ValueError(f"Invalid weave style '{weave_style}'. Cannot initialize PPO state.")
 
-    # (B) 設定樹脂
+    # 🛡️ (B) 設定樹脂 (拒絕靜默取代)
     r_idx = find_index_smartly(resin_name, env.resin_options, "resin")
     if r_idx is not None:
         env.cur_resin_idx = r_idx
+    else:
+        raise ValueError(f"Resin material '{resin_name}' not found. Cannot initialize PPO state.")
     real_resin_name = env.resin_options[env.cur_resin_idx]
 
-    # (C) 設定纖維
+    # 🛡️ (C) 設定纖維 (拒絕靜默取代)
     f_idx = find_index_smartly(fiber_name, env.fiber_options, "fiber")
     if f_idx is not None:
         env.cur_fiber_idx = f_idx
+    else:
+        raise ValueError(f"Fiber material '{fiber_name}' not found. Cannot initialize PPO state.")
     real_fiber_name = env.fiber_options[env.cur_fiber_idx]
 
     if verbose:
         print(f"Mapped Material: {real_resin_name} + {real_fiber_name}")
 
-    # (D) 設定幾何 (PPO 環境需要同時處理 Real 數值與 Normal 數值)
+    # 🛡️ (D) 設定幾何 (拔除 np.clip，加入嚴格邊界驗證)
     g_angle = geo_dict.get("angle")
     g_width = geo_dict.get("width")
     g_height = geo_dict.get("height")
 
-    # 取值或使用預設
-    angle_val = float(g_angle) if g_angle is not None else 60.0
-    width_val = float(g_width) if g_width is not None else 0.5
-    height_val = float(g_height) if g_height is not None else 0.2
+    try:
+        angle_val = float(g_angle) if g_angle is not None else 60.0
+        width_val = float(g_width) if g_width is not None else 0.5
+        height_val = float(g_height) if g_height is not None else 0.2
+    except (ValueError, TypeError):
+        raise ValueError("Geometry parameters must be valid numerical values.")
+        
+    geo_arr = np.array([angle_val, width_val, height_val])
     
-    # 寫入真實幾何並 Clip
-    env.cur_geo_real = np.array([angle_val, width_val, height_val])
-    env.cur_geo_real = np.clip(env.cur_geo_real, env.geo_min, env.geo_max)
+    # 嚴格邊界驗證
+    if not (np.all(geo_arr >= env.geo_min) and np.all(geo_arr <= env.geo_max)):
+        raise ValueError(f"Initial geometry {geo_arr} is out of physical bounds. Rejecting optimization.")
+        
+    env.cur_geo_real = geo_arr
     
     # [關鍵轉換] 將真實物理數值反向映射回 [-1, 1]，供神經網路讀取
     env.cur_geo_norm = 2.0 * (env.cur_geo_real - env.geo_min) / (env.geo_max - env.geo_min) - 1.0
@@ -1309,7 +1385,7 @@ def optimize_composite(
     print(f"{'Weave':<15} | {metrics['initial']['weave']:<22} | {metrics['optimized']['weave']:<22}")
     print(f"{'Resin':<15} | {metrics['initial']['resin']:<22} | {metrics['optimized']['resin']:<22}")
     print(f"{'Fiber':<15} | {metrics['initial']['fiber']:<22} | {metrics['optimized']['fiber']:<22}")
-    print(f"{'Angle (deg)':<15} | {metrics['initial']['geo'][0]:<22.2f} | {metrics['optimized']['geo'][0]:<22.2f}")
+    print(f"{'Angle (deg)':<15} | {metrics['initial']['geo'][0]:<22.1f} | {metrics['optimized']['geo'][0]:<22.1f}")
     print(f"{'Width (mm)':<15} | {metrics['initial']['geo'][1]:<22.2f} | {metrics['optimized']['geo'][1]:<22.2f}")
     print(f"{'Height (mm)':<15} | {metrics['initial']['geo'][2]:<22.2f} | {metrics['optimized']['geo'][2]:<22.2f}")
     
@@ -1320,8 +1396,98 @@ def optimize_composite(
 
     return metrics
 
+import pyvista as pv
+import numpy as np
+
+# ==========================================
+# 1. 3D 模型生成核心 (最終完美整合版：修復緞紋穿模)
+# ==========================================
+def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plain"):
+    """
+    產生 3D 編織模型的 PyVista Plotter 物件，完美支援平紋、斜紋與緞紋，並修復穿模
+    """
+    num_yarns = 8 
+    theta = np.radians(angle) 
+    
+    pitch = (width * 1.1) / max(np.sin(theta), 0.1)
+    
+    # [修改 1] 保留最適合斜紋與緞紋展示的視覺誇張係數 2.5
+    visual_z_scale = 2.5 
+    amp = (height / 2) * visual_z_scale
+
+    style = weave_style.lower()
+    
+    # [整合核心] 根據不同的編織法給予專屬的相位偏移
+    if style in ["twill", "斜紋"]:
+        d1, d2 = np.pi / 2, np.pi / 2
+        # **斜紋不需要額外偏移，保留完美的長浮動流暢交錯**
+        offset_u, offset_v = 0.0, 0.0
+    elif style in ["satin", "段紋", "緞紋"]:
+        d1, d2 = 2 * np.pi / 5, 4 * np.pi / 5 
+        # **[修改 2] 核心修復：緞紋也需要特定的中心對齊相位校正，解決穿模問題**
+        offset_u = ((num_yarns - 1) / 2) * d2
+        offset_v = ((num_yarns - 1) / 2) * d1
+    else:
+        # 預設為 plain 平紋
+        d1, d2 = np.pi, np.pi            
+        # **平紋加入相位校正**
+        offset_u = ((num_yarns - 1) / 2) * d2
+        offset_v = ((num_yarns - 1) / 2) * d1
+
+    vec_warp = np.array([1.0, 0.0, 0.0]) 
+    vec_weft = np.array([np.cos(theta), np.sin(theta), 0.0])
+
+    fabric_span = (num_yarns - 1) * pitch
+    yarn_len_logical = fabric_span + width * 2.5
+
+    plotter = pv.Plotter(notebook=True)
+    tube_z_scale = (height / width) * (visual_z_scale * 0.8)
+
+    # --- 建立經紗 (Warp) ---
+    for i in range(num_yarns):
+        v_logical = (i - (num_yarns - 1) / 2) * pitch
+        u_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
+        
+        points = []
+        for u in u_points:
+            pos = u * vec_warp + v_logical * vec_weft
+            # **將 offset_u 整合進cosine方程式中**
+            z = amp * np.cos(i * d1 + u * (d2 / pitch) + offset_u)
+            points.append([pos[0], pos[1], z])
+            
+        tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
+        tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
+        plotter.add_mesh(tube, color="crimson", smooth_shading=True, specular=0.5)
+
+    # --- 建立緯紗 (Weft) ---
+    for j in range(num_yarns):
+        u_logical = (j - (num_yarns - 1) / 2) * pitch
+        v_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
+        
+        points = []
+        for v in v_points:
+            pos = u_logical * vec_warp + v * vec_weft
+            z = amp * np.cos(v * (d1 / pitch) + j * d2 + offset_v + np.pi)
+            points.append([pos[0], pos[1], z])
+
+        tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
+        tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
+        plotter.add_mesh(tube, color="dodgerblue", smooth_shading=True, specular=0.5)
+
+    plotter.set_background("white")
+    plotter.add_axes()
+    plotter.view_isometric()
+    
+    # [修改 3] 保留最適合斜紋與緞紋展示的 15 度攝影機仰角
+    plotter.camera.elevation = 15 
+    plotter.camera.azimuth = 45
+    plotter.camera.zoom(1.2)
+    
+    return plotter
+
 # Cell 5: Load Llama-3.1 Agent (Standard Float16 Mode)
 import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 # ==========================================
 # PLEASE PASTE YOUR HUGGING FACE TOKEN HERE
@@ -1330,21 +1496,64 @@ import torch
 import streamlit as st
 YOUR_HF_TOKEN = st.secrets["HF_TOKEN"]
 
-from huggingface_hub import InferenceClient
-import streamlit as st
-import json
 
 class LLMAgent:
     def __init__(self, hf_token):
+        # Using Llama 3.1
         self.model_id = "meta-llama/Llama-3.1-8B-Instruct"
-        # 使用 InferenceClient
-        self.client = InferenceClient(api_key=hf_token)
+        
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Initializing LLM Agent ({self.model_id})...")
+        print(f"Device detected: {self.device}")
 
+        try:
+            # 1. Load Tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_id, 
+                token=hf_token
+            )
+            
+            # 2. Load Model (Standard Float16)
+            print("Loading model in Float16 mode (Requires ~16GB VRAM/RAM)...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                dtype=torch.float16, 
+                device_map="auto",
+                token=hf_token
+            )
+            
+            # 3. Create Pipeline
+            self.pipe = pipeline(
+                "text-generation",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                max_new_tokens=512, # [修改] 增加長度以容納對話回應
+                temperature=0.1,
+                do_sample=True
+            )
+            print("Success: Llama-3.1 Agent loaded.")
+            
+        except Exception as e:
+            print(f"Error loading LLM: {e}")
+            print("Please check your Hugging Face token.")
+            self.pipe = None
+
+    # [修改] 增加 resin_options 和 fiber_options 參數
     def parse_instruction(self, user_text, resin_options=[], fiber_options=[]):
-        # 這裡的邏輯保持與您原本的一模一樣，確保 Prompt 品質不變
+        """
+        Convert natural language to JSON string.
+        Enhanced to support General Chat and Material Awareness.
+        """
+        if not self.pipe:
+            return None
+            
+        # 1. 準備上下文資訊 (將材料轉為字串)
+        # 取前 20 個避免 Prompt 太長
         resin_str = ", ".join(str(r) for r in resin_options[:20]) if resin_options else "Standard Resins"
         fiber_str = ", ".join(str(f) for f in fiber_options[:20]) if fiber_options else "Standard Fibers"
 
+        # 2. 構建 System Prompt (使用 f-string 注入資料)
+        # 注意：JSON 的大括號在 f-string 中需要用雙大括號 {{ }} 跳脫
         system_prompt = f"""
         You are an intelligent AI assistant for Composite Material Design (Engineering Science).
         Your goal is to assist users in designing or predicting material properties using a deep learning surrogate model.
@@ -1355,15 +1564,15 @@ class LLMAgent:
 
         Your task is to analyze the user's input and output a strictly valid JSON object.
 
-        --- Rules for "task_type" ---
-        1. "prediction": User provides parameters (weave, resin, fiber, angle) and asks for properties.
-        2. "design": User asks to optimize/maximize/find best config for a target (stiffness, energy, yield).
-        3. "general_chat": User says hello, asks "how to use", asks for material list, or asks non-technical questions.
+         --- Rules for "task_type" ---
+        1. "prediction": User asks to calculate, evaluate, or predict properties. (Classify as this EVEN IF parameters or materials are missing).
+        2. "design": User asks to optimize, maximize, or design a composite for a target. (Classify as this EVEN IF parameters or materials are missing).
+        3. "general_chat": ONLY for greetings, asking for material lists, or non-technical questions. Do NOT use this if the user wants to design or predict.
 
         --- JSON Structure ---
         {{
             "task_type": "prediction" | "design" | "general_chat",
-            "target": "max_stiffness" | "max_energy" | "max_yield" | null,
+            "target": "max_stiffness" | "max_energy" (use this for strain energy density) | "max_yield" | null,
             "weave": "plain" | "twill" | "satin" (Default: "plain"),
             "geo": {{ "angle": float, "width": float, "height": float }} (Extract explicitly mentioned values only),
             "resin": string (Extract material name) | null,
@@ -1381,204 +1590,153 @@ class LLMAgent:
         Output ONLY the JSON string. No markdown, no explanations.
         """
 
-        # 關鍵差異：使用 chat_completion 確保 Llama 識別 system 與 user 角色
-        try:
-            response = self.client.chat_completion(
-                model=self.model_id,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text}
-                ],
-                temperature=0.1,
-                max_tokens=512
-            )
-            
-            generated_text = response.choices[0].message.content
-            return generated_text.replace("```json", "").replace("```", "").strip()
-            
-        except Exception as e:
-            print(f"API Error: {e}")
-            return None
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
 
-
-import pyvista as pv
-import numpy as np
-
-# ==========================================
-# 1. 3D 模型生成核心 (最終完美整合版：修復緞紋穿模)
-# ==========================================
-def generate_3d_woven_plotter(width=1.0, height=0.2, angle=90, weave_style="plain"):
-    """
-    產生 3D 編織模型的 PyVista Plotter 物件，完美支援平紋、斜紋與緞紋，並修復穿模
-    """
-    num_yarns = 8
-    theta = np.radians(angle)
-    pitch = (width * 1.1) / max(np.sin(theta), 0.1) 
-
-    # [修改 1] 保留最適合斜紋與緞紋展示的視覺誇張係數 2.5
-    visual_z_scale = 2.5
-    amp = (height / 2) * visual_z_scale
-
-    style = weave_style.lower()
-
-    # [整合核心] 根據不同的編織法給予專屬的相位偏移
-    if style in ["twill", "斜紋"]:
-        d1, d2 = np.pi / 2, np.pi / 2
-        # **斜紋不需要額外偏移，保留完美的長浮動流暢交錯**
-        offset_u, offset_v = 0.0, 0.0
-    elif style in ["satin", "段紋", "緞紋"]:
-        d1, d2 = 2 * np.pi / 5, 4 * np.pi / 5
-        # **[修改 2] 核心修復：緞紋也需要特定的中心對齊相位校正，解決穿模問題**
-        offset_u = ((num_yarns - 1) / 2) * d2
-        offset_v = ((num_yarns - 1) / 2) * d1
-    else:
-        # 預設為 plain 平紋
-        d1, d2 = np.pi, np.pi            
-        # **平紋加入相位校正**
-        offset_u = ((num_yarns - 1) / 2) * d2
-        offset_v = ((num_yarns - 1) / 2) * d1
-
-    vec_warp = np.array([1.0, 0.0, 0.0])
-    vec_weft = np.array([np.cos(theta), np.sin(theta), 0.0])
-
-    fabric_span = (num_yarns - 1) * pitch
-    yarn_len_logical = fabric_span + width * 2.5
-
-    plotter = pv.Plotter(notebook=True)
-    tube_z_scale = (height / width) * (visual_z_scale * 0.8)
-
-    # --- 建立經紗 (Warp) ---
-    for i in range(num_yarns):
-        v_logical = (i - (num_yarns - 1) / 2) * pitch
-        u_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
-
-        points = []
-        for u in u_points:
-            pos = u * vec_warp + v_logical * vec_weft
-            # **將 offset_u 整合進cosine方程式中**
-            z = amp * np.cos(i * d1 + u * (d2 / pitch) + offset_u)
-            points.append([pos[0], pos[1], z])
-           
-
-        tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
-        tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
-        plotter.add_mesh(tube, color="crimson", smooth_shading=True, specular=0.5)
-
-    # --- 建立緯紗 (Weft) ---
-    for j in range(num_yarns):
-        u_logical = (j - (num_yarns - 1) / 2) * pitch
-        v_points = np.linspace(-yarn_len_logical/2, yarn_len_logical/2, 200)
-
-        points = []
-        for v in v_points:
-            pos = u_logical * vec_warp + v * vec_weft
-            z = amp * np.cos(v * (d1 / pitch) + j * d2 + offset_v + np.pi)
-            points.append([pos[0], pos[1], z])
-
-        tube = pv.Spline(np.array(points), 200).tube(radius=width/2.5)
-        tube = tube.scale([1.0, 1.0, tube_z_scale], inplace=False)
-        plotter.add_mesh(tube, color="dodgerblue", smooth_shading=True, specular=0.5)
-
-    plotter.set_background("white")
-    plotter.add_axes()
-    plotter.view_isometric()
-
-    # [修改 3] 保留最適合斜紋與緞紋展示的 15 度攝影機仰角
-    plotter.camera.elevation = 15
-    plotter.camera.azimuth = 45
-    plotter.camera.zoom(1.2)
-
-    return plotter
+        # print("Agent is parsing instruction...")
+        outputs = self.pipe(
+            messages, 
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.eos_token_id
+        )
+        
+        generated_text = outputs[0]["generated_text"][-1]["content"]
+        
+        # Cleanup       
+        # [建議升級] 使用 Regex 嚴格提取 JSON 區塊：
+        import re
+        match = re.search(r'\{.*\}', generated_text, flags=re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+        else:
+            # 作為 Fallback
+            clean_json = generated_text.replace("```json", "").replace("```", "").strip()
+                   
+        return clean_json
 
 
 import json
 import math
+from pydantic import BaseModel, Field, ValidationError, model_validator
+from typing import Literal, Optional, Dict, Any
 
-# ==========================================
-# 2. 修改後的主程式介面 (加入高強度防呆與安全澄清機制)
-# ==========================================
+# =========================================================
+# 🛡️ 1. 定義 Pydantic Schema (符合審查要求的高強度防呆與範圍驗證)
+# =========================================================
+class GeoParams(BaseModel):
+    # 使用 Field 限制數值範圍 (ge: 大於等於, le: 小於等於)
+    # 若 LLM 回傳 999 或是負數，將直接引發 ValidationError 被系統攔截
+    angle: Optional[float] = Field(default=None, ge=30.0, le=90.0)
+    width: Optional[float] = Field(default=None, ge=0.2, le=1.0)
+    height: Optional[float] = Field(default=None, ge=0.1, le=0.4)
+
+class LLMOutputSchema(BaseModel):
+    task_type: Literal["prediction", "design", "general_chat"]
+    target: Optional[Literal["max_stiffness", "max_energy", "max_yield"]] = None
+    weave: Optional[Literal["plain", "twill", "satin"]] = None
+    resin: Optional[str] = None
+    fiber: Optional[str] = None
+    geo: Optional[GeoParams] = Field(default_factory=GeoParams)
+    reply: Optional[str] = None
+
+    @model_validator(mode='after')
+    def validate_materials(self):
+        # Required-field 驗證：任務若為 prediction 或 design，必須明確指定材料
+        if self.task_type in ["prediction", "design"]:
+            def is_invalid(m):
+                return m is None or str(m).strip().lower() in ["none", "null", "nan", ""]
+            
+            if is_invalid(self.resin):
+                raise ValueError("Missing 'resin'. 請明確指定樹脂 (Resin) 材料。")
+            if is_invalid(self.fiber):
+                raise ValueError("Missing 'fiber'. 請明確指定纖維 (Fiber) 材料。")
+        return self
+
+
+# =========================================================
+# 2. 修改後的主程式介面 (包含 Schema 驗證與避免靜默取代機制)
+# =========================================================
 def run_LLM(user_query):
     print("="*60)
     print(f"User Input: {user_query}")
     print("="*60)
     
-    # --- Check Agent ---
     if 'my_agent' not in globals() or my_agent is None:
         print("Error: Agent not loaded. Please run Cell 5 first.")
         return None
 
     try:
         # --- Step 1: 準備材料上下文 ---
-        if 'env' in globals() and env is not None:
-            r_opts = env.resin_options
-            f_opts = env.fiber_options
-        else:
-            r_opts = []
-            f_opts = []
+        r_opts = env.resin_options if 'env' in globals() and env is not None else []
+        f_opts = env.fiber_options if 'env' in globals() and env is not None else []
 
         # --- Step 2: LLM Parsing ---
         json_str = my_agent.parse_instruction(user_query, resin_options=r_opts, fiber_options=f_opts)
         
         # ---------------------------------------------------------
-        # 🛡️ [防護機制啟動] 針對審查委員要求的高強度 JSON 驗證
+        # 🛡️ [防護機制啟動] 導入 Pydantic 進行 Schema 驗證
         # ---------------------------------------------------------
         try:
-            params = json.loads(json_str)
+            raw_dict = json.loads(json_str)
+            if not isinstance(raw_dict, dict) or not raw_dict:
+                raise ValueError("解析結果必須為有效的 JSON 物件。")
+            
+            # 透過 Pydantic 進行驗證
+            validated_data = LLMOutputSchema(**raw_dict)
+            
+            # 相容 Pydantic v1 與 v2 的寫法，轉回字典供後續使用
+            params = validated_data.model_dump() if hasattr(validated_data, "model_dump") else validated_data.dict()
+            
         except json.JSONDecodeError:
             print(f"JSON Parsing Failed. Raw: {json_str}")
             return {
-                "task_type": "general_chat",
-                "reply": "系統錯誤：無法解析您的指令格式，請用更清晰的語言再試一次。",
+                "task_type": "error",
+                "reply": "【系統錯誤】無法解析您的指令格式，請用更清晰的語言再試一次。",
                 "params": {}, "data": None, "figure": None, "plotter": None
             }
-
-        # 1. 阻絕 JSON Array (必須是 dict)
-        if not isinstance(params, dict):
+        except ValidationError as e:
+            error_msgs = [f"- {err['loc'][-1]}: {err['msg']}" for err in e.errors()]
+            print("⚠️ Safe Clarification Triggered (Schema Validation Failed)")
             return {
-                "task_type": "general_chat",
-                "reply": "系統錯誤：接收到無效的陣列格式 (JSON Array)。請重新輸入指令。",
-                "params": {}, "data": None, "figure": None, "plotter": None
+                "task_type": raw_dict.get("task_type", "error"), # 👈 保留原始判斷，不篡改
+                "reply": "【安全澄清機制】您的輸入包含無效參數或超出物理範圍：\n" + "\n".join(error_msgs) + "\n請修正後再試。",
+                "params": raw_dict, "data": None, "figure": None, "plotter": None
             }
-
-        # 2. 阻絕 Empty Object (空物件)
-        if not params:
+        except ValueError as e:
+            print(f"⚠️ Safe Clarification Triggered: {e}")
             return {
-                "task_type": "general_chat",
-                "reply": "系統錯誤：接收到空指令 (Empty Object)。請提供更多具體的設計或預測細節。",
-                "params": {}, "data": None, "figure": None, "plotter": None
+                "task_type": raw_dict.get("task_type", "error"), # 👈 保留原始判斷
+                "reply": f"【安全澄清機制】{str(e)}",
+                "params": raw_dict, "data": None, "figure": None, "plotter": None
             }
-
-        # 3. 過濾未知 Task Type
-        valid_tasks = ["prediction", "design", "general_chat"]
-        task_type = params.get("task_type", "general_chat")
-        if task_type not in valid_tasks:
-            task_type = "general_chat"
-            params["reply"] = "無法辨識的任務類型。請明確指示您需要「預測性質」還是「最佳化設計」。"
-
-        # 4. 【核心修復】防止 Null 材料導致 PPO 啟動隨機環境 (Safe Clarification)
-        if task_type in ["prediction", "design"]:
-            resin_val = params.get("resin")
-            fiber_val = params.get("fiber")
-            
-            # 定義判斷無效材料的邏輯 (擋下 null, None, NaN, 空字串)
-            def is_invalid_mat(m):
-                if m is None: return True
-                if isinstance(m, str) and m.strip().lower() in ["nan", "null", "none", ""]: return True
-                if isinstance(m, float) and math.isnan(m): return True
-                return False
-                
-            if is_invalid_mat(resin_val) or is_invalid_mat(fiber_val):
-                print("⚠️ Safe Clarification Triggered: Material cannot be null/NaN.")
-                return {
-                    "task_type": "general_chat",
-                    "reply": "【安全澄清機制】我注意到您沒有指定（或提供了無效的）樹脂與纖維材料。為了避免系統進行無意義的隨機模擬，請明確告訴我要使用哪種樹脂與纖維？",
-                    "params": params, "data": None, "figure": None, "plotter": None
-                }
         # ---------------------------------------------------------
         # 🛡️ 防護機制結束
         # ---------------------------------------------------------
 
+        task_type = params["task_type"]
         print(f"\n[Step 1] Intent Detected: {task_type.upper()}")
+
+        # === 處理缺失值並透明宣告 (避免靜默取代 Silent Override) ===
+        transparent_notice = ""
+        if task_type in ["prediction", "design"]:
+            assumed = []
+            if params["weave"] is None:
+                params["weave"] = "plain"
+                assumed.append("Weave=plain")
+            if params["geo"]["angle"] is None:
+                params["geo"]["angle"] = 60.0
+                assumed.append("Angle=60.0°")
+            if params["geo"]["width"] is None:
+                params["geo"]["width"] = 0.6
+                assumed.append("Width=0.6mm")
+            if params["geo"]["height"] is None:
+                params["geo"]["height"] = 0.2
+                assumed.append("Height=0.2mm")
+                
+            if assumed:
+                transparent_notice = "\n\n【系統提示】部分參數未指定，已透明化啟用基準設定：" + ", ".join(assumed) + "。"
 
         # 準備回傳結構
         result_package = {
@@ -1587,25 +1745,8 @@ def run_LLM(user_query):
             "data": None,
             "figure": None,
             "plotter": None,
-            "reply": params.get("reply", None)
+            "reply": params.get("reply") or ""
         }
-
-        # --- 定義一個穩健的參數讀取小工具 (防範 NaN 與 None) ---
-        def safe_get_float(dictionary, key, default_value):
-            val = dictionary.get(key)
-            if val is None:
-                return float(default_value)
-            # 處理字串型態的 "NaN"
-            if isinstance(val, str) and val.strip().lower() == "nan":
-                return float(default_value)
-            try:
-                f_val = float(val)
-                # 處理浮點數的 NaN
-                if math.isnan(f_val):
-                    return float(default_value)
-                return f_val
-            except (ValueError, TypeError):
-                return float(default_value)
 
         # --- Step 3: 分流處理 ---
 
@@ -1616,17 +1757,14 @@ def run_LLM(user_query):
         # === 分支 B: 最佳化設計 (Optimization) ===
         elif task_type == "design":
             target = params.get("target", "max_stiffness")
-            weave_style = params.get("weave", "plain")
-            geo_dict = params.get("geo", {})
-            if not isinstance(geo_dict, dict): geo_dict = {} # 防呆：確保 geo 一定是 dict
-
-            resin_name = params.get("resin", "Epoxy")
-            fiber_name = params.get("fiber", "Carbon")
+            weave_style = params["weave"]
+            geo_dict = params["geo"]
+            resin_name = params["resin"]
+            fiber_name = params["fiber"]
 
             print(f"    Target: {target}")
             print(f"    Initial Point: {resin_name}/{fiber_name}, Geo={geo_dict}")
             
-            # 執行最佳化
             if 'optimize_composite' in globals():
                 opt_metrics = optimize_composite(
                     target_type=target,
@@ -1638,12 +1776,11 @@ def run_LLM(user_query):
                 )
                 result_package["data"] = opt_metrics
                 
-                # 生成對應的 3D 模型
                 try:
                     opt_geo = opt_metrics.get("optimized", {}).get("geo", [90.0, 1.0, 0.2])
                     opt_weave = opt_metrics.get("optimized", {}).get("weave", "plain")
                     a, w, h = float(opt_geo[0]), float(opt_geo[1]), float(opt_geo[2])
-                    print(f"    Generating Optimized 3D Model (Angle:{a}°, Width:{w:.2f}, Height:{h:.2f}, Style:{opt_weave})...")
+                    print(f"    Generating Optimized 3D Model...")
                     if 'generate_3d_woven_plotter' in globals():
                         result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=opt_weave)
                 except Exception as e:
@@ -1651,16 +1788,13 @@ def run_LLM(user_query):
 
         # === 分支 C: 物理預測 (Prediction) ===
         elif task_type == "prediction":
-            weave_style = params.get("weave", "plain")
-            geo_dict = params.get("geo", {})
-            if not isinstance(geo_dict, dict): geo_dict = {} # 防呆
-
-            resin_name = params.get("resin", "Epoxy")
-            fiber_name = params.get("fiber", "Carbon")
+            weave_style = params["weave"]
+            geo_dict = params["geo"]
+            resin_name = params["resin"]
+            fiber_name = params["fiber"]
 
             print(f"    Configuration: {resin_name}/{fiber_name}, Geo={geo_dict}")
             
-            # 執行預測
             if 'evaluate_composite' in globals():
                 eval_metrics, fig = evaluate_composite(
                     weave_style=weave_style, 
@@ -1673,29 +1807,26 @@ def run_LLM(user_query):
                 result_package["data"] = eval_metrics
                 result_package["figure"] = fig 
                 
-                # 生成對應的 3D 模型
                 try:
-                    w = safe_get_float(geo_dict, "width", 1.0)
-                    h = safe_get_float(geo_dict, "height", 0.2)
-                    raw_angle = geo_dict.get("angle") if geo_dict.get("angle") is not None else params.get("angle")
-                    a = float(raw_angle) if raw_angle is not None and str(raw_angle).lower() != "nan" else 90.0
-                    
+                    w, h, a = float(geo_dict["width"]), float(geo_dict["height"]), float(geo_dict["angle"])
                     print(f"    Generating Prediction 3D Model ({a}°)...")
                     if 'generate_3d_woven_plotter' in globals():
                         result_package["plotter"] = generate_3d_woven_plotter(width=w, height=h, angle=a, weave_style=weave_style)
                 except Exception as e:
                     print(f"    Warning: Failed to generate 3D model: {e}")
-            
+        
+        # 將透明宣告附加到回覆訊息中
+        result_package["reply"] += transparent_notice
         return result_package
 
     except Exception as e:
         print(f"Agent Error: {e}")
+        t_type = params.get("task_type", "error") if 'params' in locals() else "error"
         return {
-            "task_type": "general_chat",
-            "reply": f"系統發生未預期錯誤: {str(e)}",
-            "params": {}, "data": None, "figure": None, "plotter": None
+            "task_type": t_type,
+            "reply": f"【系統錯誤】發生未預期錯誤: {str(e)}",
+            "params": params if 'params' in locals() else {}, "data": None, "figure": None, "plotter": None
         }
-
 
 
 # ==========================================
