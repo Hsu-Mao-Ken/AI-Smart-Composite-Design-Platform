@@ -19,7 +19,7 @@ import time
 import matplotlib.pyplot as plt 
 from stpyvista import stpyvista 
 
-from LLM_composite_web_function_PPO import initialize_system, run_LLM
+from LLM_composite_web_function_PPO_APP import initialize_system, run_LLM
 
 # 1. 頁面基本設定
 st.set_page_config(
